@@ -274,6 +274,7 @@ SCRIPTS_TO_DOWNLOAD=(
     amnezia-notify-setup.sh
     amnezia-healthcheck.sh
     amnezia-traffic-collector.py
+    amnezia-vpn-link.py
     amnezia-panel-access.sh
     amnezia-server-install.sh
     amnezia-backup.sh
