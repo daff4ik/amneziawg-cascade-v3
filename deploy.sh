@@ -636,11 +636,18 @@ EOF
     systemctl restart awg-quick@awg0
     sleep 3
 
-    TUN_OK=1
-    ping -c 3 -W 3 "$TUNNEL_B_IP" >/dev/null 2>&1 || TUN_OK=0
-    if [[ $IPV6_ENABLED -eq 1 ]]; then
-        ping -6 -c 3 -W 3 "$TUNNEL_B_IP6" >/dev/null 2>&1 || TUN_OK=0
-    fi
+    # Первый handshake с обфускацией может занять до полуминуты —
+    # проверяем туннель в цикле, а не один раз
+    TUN_OK=0
+    for _ in $(seq 1 10); do
+        TUN_OK=1
+        ping -c 2 -W 2 "$TUNNEL_B_IP" >/dev/null 2>&1 || TUN_OK=0
+        if [[ $IPV6_ENABLED -eq 1 ]]; then
+            ping -6 -c 2 -W 2 "$TUNNEL_B_IP6" >/dev/null 2>&1 || TUN_OK=0
+        fi
+        [[ $TUN_OK -eq 1 ]] && break
+        sleep 3
+    done
     if [[ $TUN_OK -eq 1 ]]; then
         ok "Туннель awg0 работает"
     else
