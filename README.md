@@ -130,6 +130,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/daff4ik/amneziawg-c
 * **Обновление AmneziaWG:** `sudo amnezia-update-awg.sh`
 * **Замена SERVER-B:** `sudo amnezia-restore-b.sh`
 * **Протоколы:** `sudo amnezia-proto-<имя>.sh install|remove|status` (amnezia-dns, mtproxy, telemt)
+* **Основной протокол:** `sudo amnezia-proto-amneziawg.sh status|update`
+* **Конвертер конфига в vpn:// ссылку:** `sudo amnezia-vpn-link.py /root/clients/<имя>.conf "<имя сервера>"`
+* **Временный доступ к панели по IP:8000 (при включённом Stealth):** `sudo amnezia-panel-access.sh on|off`
+* **Отправить тестовое уведомление в Telegram:** `sudo amnezia-notify.sh "текст"`
+
+Внутренние скрипты (вызываются системой, вручную обычно не нужны): `amnezia-server-install.sh` (ставит пакеты AmneziaWG, вызывается deploy.sh), `amnezia-traffic-collector.py` (сбор статистики трафика по cron), `amnezia-notify.sh` (отправка уведомлений из других скриптов).
 
 ## 📱 Клиентские приложения
 
