@@ -75,6 +75,47 @@ SSL_CERT="/etc/amnezia-panel-ssl/fullchain.pem"
 SSL_KEY="/etc/amnezia-panel-ssl/privkey.pem"
 HAVE_SSL=0
 [[ -f "$SSL_CERT" && -f "$SSL_KEY" ]] && HAVE_SSL=1
+# Уже есть сертификат от certbot — используем его
+if [[ $HAVE_SSL -eq 0 && -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+    SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+    SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+    HAVE_SSL=1
+fi
+
+# Сертификата нет — пробуем acme.sh (tls-alpn-01, порт 443): работает даже
+# когда хостер фильтрует порт 80 (anti-DDoS) и certbot бессилен.
+# Порт 443 на этом этапе свободен (nginx ещё не слушает SSL).
+if [[ $HAVE_SSL -eq 0 ]]; then
+    echo "Попытка выпустить SSL через acme.sh (tls-alpn-01, порт 443)..."
+    if [[ ! -x /root/.acme.sh/acme.sh ]]; then
+        command -v git >/dev/null || apt install -y -qq git < /dev/null
+        for m in "https://github.com/acmesh-official/acme.sh.git" \
+                 "https://ghproxy.net/https://github.com/acmesh-official/acme.sh.git" \
+                 "https://mirror.ghproxy.com/https://github.com/acmesh-official/acme.sh.git"; do
+            git clone --depth 1 "$m" /tmp/acme.sh-install 2>/dev/null && break
+        done
+        if [[ -f /tmp/acme.sh-install/acme.sh ]]; then
+            (cd /tmp/acme.sh-install && ./acme.sh --install >/dev/null 2>&1 || true)
+        fi
+        rm -rf /tmp/acme.sh-install
+    fi
+    if [[ -x /root/.acme.sh/acme.sh ]]; then
+        mkdir -p /etc/amnezia-panel-ssl
+        if /root/.acme.sh/acme.sh --issue --alpn -d "$DOMAIN" --server letsencrypt \
+            --pre-hook "systemctl stop nginx 2>/dev/null || true" \
+            --post-hook "systemctl start nginx 2>/dev/null || true"; then
+            /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
+                --key-file /etc/amnezia-panel-ssl/privkey.pem \
+                --fullchain-file /etc/amnezia-panel-ssl/fullchain.pem \
+                --reloadcmd "systemctl reload nginx" && HAVE_SSL=1
+        fi
+    fi
+    if [[ $HAVE_SSL -eq 1 ]]; then
+        echo "✅ SSL сертификат получен через acme.sh (авто-продление — cron acme.sh)"
+    else
+        echo "⚠️ acme.sh не смог выпустить SSL — пробуем certbot (порт 80)"
+    fi
+fi
 
 if [[ $HAVE_SSL -eq 1 ]]; then
 cat > /etc/nginx/sites-available/amnezia-stealth <<EOF
