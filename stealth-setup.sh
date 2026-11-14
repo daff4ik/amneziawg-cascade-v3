@@ -68,6 +68,58 @@ echo "Установка Nginx и Certbot..."
 apt update -qq < /dev/null
 apt install -y -qq nginx certbot python3-certbot-nginx < /dev/null
 
+# Если сертификат уже выпущен внешним инструментом (например, acme.sh через
+# tls-alpn-01 — когда хостер фильтрует порт 80 и certbot не работает),
+# пишем SSL-конфиг сами и certbot не вызываем.
+SSL_CERT="/etc/amnezia-panel-ssl/fullchain.pem"
+SSL_KEY="/etc/amnezia-panel-ssl/privkey.pem"
+HAVE_SSL=0
+[[ -f "$SSL_CERT" && -f "$SSL_KEY" ]] && HAVE_SSL=1
+
+if [[ $HAVE_SSL -eq 1 ]]; then
+cat > /etc/nginx/sites-available/amnezia-stealth <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+
+    ssl_certificate     $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    root $WEB_ROOT;
+    index index.html index.htm;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+
+    # Строгий редирект для секретного пути (добавляет слэш на конце, если его нет)
+    location = /$SECRET_PATH {
+        return 301 /$SECRET_PATH/;
+    }
+
+    # Проксирование панели Amnezia
+    location /$SECRET_PATH/ {
+        proxy_pass http://127.0.0.1:8000/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # Поддержка WebSocket (на будущее)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+else
 cat > /etc/nginx/sites-available/amnezia-stealth <<EOF
 server {
     listen 80;
@@ -100,19 +152,32 @@ server {
     }
 }
 EOF
+fi
 
 ln -sf /etc/nginx/sites-available/amnezia-stealth /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl restart nginx
 
+if [[ $HAVE_SSL -eq 1 ]]; then
+    echo "✅ Найден готовый SSL-сертификат (/etc/amnezia-panel-ssl) — HTTPS настроен."
+else
 echo "Получение SSL-сертификата Let's Encrypt для $DOMAIN..."
 if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
         --register-unsafely-without-email --redirect; then
     echo "✅ SSL сертификат получен успешно!"
 else
     echo "⚠️ Не удалось получить SSL. Убедитесь, что DNS-запись указывает на этот сервер."
-    echo "⚠️ Сайт и панель пока будут доступны по HTTP (порт 80)."
+    echo "⚠️ Если хостер фильтрует порт 80 (anti-DDoS), выпустите сертификат через acme.sh:"
+    echo "   curl https://get.acme.sh | sh -s email=you@example.com"
+    echo "   ~/.acme.sh/acme.sh --issue --alpn -d $DOMAIN --server letsencrypt \\"
+    echo "     --pre-hook 'systemctl stop nginx' --post-hook 'systemctl start nginx'"
+    echo "   ~/.acme.sh/acme.sh --install-cert -d $DOMAIN \\"
+    echo "     --key-file /etc/amnezia-panel-ssl/privkey.pem \\"
+    echo "     --fullchain-file /etc/amnezia-panel-ssl/fullchain.pem \\"
+    echo "     --reloadcmd 'systemctl reload nginx'"
+    echo "   и запустите этот скрипт ещё раз."
+fi
 fi
 
 # =====================================================================
