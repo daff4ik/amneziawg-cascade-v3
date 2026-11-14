@@ -29,7 +29,7 @@
 
 ## 🚀 Установка (Быстрый старт)
 
-На чистом **SERVER-A** (от `root`, Ubuntu 22.04 / Debian 12):
+На чистом **SERVER-A** (от `root`, Ubuntu 22.04 / 24.04 / Debian 12):
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/daff4ik/amneziawg-cascade-v3/main/deploy.sh -o /tmp/deploy.sh >/dev/null; cat /tmp/deploy.sh)"
