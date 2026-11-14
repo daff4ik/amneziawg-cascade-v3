@@ -1076,7 +1076,7 @@ function renderClients(clients) {
       <td data-label="Статус"><span class="status-badge ${statusClass}">${statusLabel}</span></td>
       <td data-label="RX">${escapeHtml(c.rx)}</td>
       <td data-label="TX">${escapeHtml(c.tx)}</td>
-      <td data-label="Handshake">${escapeHtml(c.handshake)}</td>
+      <td data-label="Handshake">${c.handshake_ts > 0 ? formatDateTime(new Date(c.handshake_ts * 1000)) : 'никогда'}</td>
       <td data-label="Действия" class="actions-cell">
         <a href="${BASE_URL}/download/conf/${encName}" class="btn btn-small" title="Скачать .conf">.conf</a>
         <a href="${BASE_URL}/download/vpn/${encName}" class="btn btn-small" title="Amnezia Link">vpn://</a>
