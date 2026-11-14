@@ -744,6 +744,18 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
         <button class="btn btn-primary" id="add-server-btn" onclick="addServer()">Проверить и добавить</button>
       </div>
     </div>
+    <div class="card">
+      <h4 style="margin-top:0;">💾 Бэкап SERVER-A</h4>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+        Полный бэкап: ключи, конфиги, клиенты, настройки панели и протоколов.
+        Создаётся ежедневно, после каждого изменения клиентов и протоколов,
+        а копия дополнительно хранится на SERVER-B. Скачайте архив к себе —
+        с ним новый сервер поднимается командой <code>deploy.sh --restore</code>.
+        Выгрузка в облако (Google Drive и др.): <code>sudo amnezia-backup-cloud.sh</code>
+      </p>
+      <button class="btn btn-primary" onclick="backupCreate()">Создать бэкап сейчас</button>
+      <div id="backups-list" style="margin-top:0.75rem;font-size:0.85rem;"></div>
+    </div>
   </div>
 
   <div id="notify-view" class="view-section">
@@ -811,7 +823,6 @@ New-NetFirewallRule -DisplayName "Allow Ping from VPN" -Direction Inbound -Proto
 
 <script>
 const BASE_URL = "__BASE__";
-const INSTALL_MODE = "__MODE__";
 let _allClients = [];
 let _serversData = { active_id: null, servers: [] };
 let _currentSort = 'name';
@@ -849,7 +860,7 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
   document.getElementById(`${tabId}-view`).classList.add('active');
   document.querySelector(`button[onclick="switchTab('${tabId}')"]`).classList.add('active');
-  if (tabId === 'servers') loadServers();
+  if (tabId === 'servers') { loadServers(); loadBackups(); }
   if (tabId === 'notify') loadNotify();
   if (tabId === 'protocols') loadProtocols();
 }
@@ -873,8 +884,9 @@ async function loadProtocols() {
           body += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:0.6rem;font-size:0.8rem;word-break:break-all;margin-bottom:0.5rem;"><code>${escapeHtml(p.link)}</code></div>
           <button class="btn btn-small" onclick="navigator.clipboard.writeText('${p.link.replace(/'/g, "\\'")}').then(()=>alert('Ссылка скопирована'))">📋 Копировать ссылку</button> `;
         }
-        if (p.file) {
-          body += `<a class="btn btn-small btn-primary" href="${BASE_URL}/api/protocols/config/${p.name}">⬇ Клиентский файл</a> `;
+        if (p.name === 'amneziawg') {
+          body += `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem;">Версия пакета: ${escapeHtml(p.version || '?')} · клиентов: ${p.clients || 0}</div>
+          <button class="btn btn-small btn-primary" onclick="protoAction('amneziawg','update','обновление AmneziaWG на обоих серверах')">⬆ Проверить обновления</button> `;
         }
         if (p.name === 'amnezia-dns') {
           const abOn = p.adblock === '1';
@@ -888,34 +900,12 @@ async function loadProtocols() {
           </div>
           <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem;">После переключения DNS клиенты должны заново импортировать конфиг / vpn:// ссылку. Блокировка рекламы применяется сразу.</div>`;
         }
-        if (p.name === 'amneziawg' && INSTALL_MODE !== '3') {
-          body += `<button class="btn btn-small btn-primary" onclick="protoCascade('amneziawg')">🔗 Сделать каскад (A → B)</button> `;
-        }
-        if (p.name === 'xray-vless') {
-          if (p.cascade) {
-            body += `<div style="font-size:0.8rem;color:var(--text-muted);margin:0.3rem 0;">🔗 Каскад через SERVER-B: ${escapeHtml(p.cascade)}</div>
-            <button class="btn btn-small" onclick="protoAction('xray-vless','direct','отключение каскада (прямое подключение)')">↩️ Прямое подключение</button> `;
-          } else {
-            body += `<button class="btn btn-small btn-primary" onclick="protoCascade('xray-vless')">🔗 Сделать каскад (A → B)</button> `;
-          }
-        }
-        body += `<button class="btn btn-small btn-danger" onclick="protoAction('${p.name}','remove','${escapeHtml(p.title)}')">Удалить</button>`;
-        if (p.clients_api === '1') {
-          body += `<div style="margin-top:0.75rem;border-top:1px dashed var(--border);padding-top:0.75rem;">
-            <div style="font-weight:600;font-size:0.9rem;margin-bottom:0.5rem;">👥 Клиенты протокола (<span id="pc-count-${p.name}">${p.clients || 0}</span>)</div>
-            <div class="form-group" style="margin-bottom:0.5rem;">
-              <input type="text" id="pc-new-${p.name}" placeholder="Имя (латиница, цифры, - _)">
-              <button class="btn btn-small btn-primary" onclick="protoClientAdd('${p.name}')">Добавить</button>
-            </div>
-            <div id="pc-list-${p.name}" style="font-size:0.85rem;"></div>
-          </div>`;
+        if (p.name !== 'amneziawg') {
+          body += `<button class="btn btn-small btn-danger" onclick="protoAction('${p.name}','remove','${escapeHtml(p.title)}')">Удалить</button>`;
         }
       } else {
         body = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem;">${escapeHtml(p.error || '')}</div>`;
-        if (p.dep && !p.dep_met) {
-          body += `<button class="btn btn-small" disabled style="opacity:0.5;cursor:not-allowed;">Установить</button>
-          <span style="font-size:0.8rem;color:var(--text-muted);"> требуется: ${escapeHtml(p.dep)}</span>`;
-        } else {
+        if (p.name !== 'amneziawg') {
           body += `<button class="btn btn-small btn-primary" onclick="protoAction('${p.name}','install','${escapeHtml(p.title)}')">Установить</button>`;
         }
       }
@@ -924,85 +914,7 @@ async function loadProtocols() {
           <strong>${escapeHtml(p.title || p.name)}</strong>${badge}
         </div>${body}</div>`;
     }).join('');
-    list.forEach(p => { if (p.installed && p.clients_api === '1') loadProtoClients(p.name); });
   } catch(e) { box.innerHTML = `<div class="alert err">❌ ${escapeHtml(e.message)}</div>`; }
-}
-
-async function loadProtoClients(pname) {
-  const el = document.getElementById('pc-list-' + pname);
-  if (!el) return;
-  try {
-    const r = await fetch(`${BASE_URL}/api/protocols/clients/${pname}`, {credentials:'same-origin'});
-    if (!r.ok) { el.innerHTML = ''; return; }
-    const cl = await r.json();
-    const cnt = document.getElementById('pc-count-' + pname);
-    if (cnt) cnt.textContent = cl.length;
-    el.innerHTML = cl.map(c => {
-      const safe = escapeHtml(c.name);
-      let act = '';
-      if (c.link) act = `<button class="btn btn-small" title="Копировать ссылку" onclick="navigator.clipboard.writeText('${c.link.replace(/'/g, "\\'")}').then(()=>alert('Ссылка скопирована'))">📋</button>`;
-      if (c.file) act = `<a class="btn btn-small" title="Скачать файл" href="${BASE_URL}/api/protocols/client-file/${pname}/${encodeURIComponent(c.name)}">⬇</a>`;
-      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:0.3rem 0;border-bottom:1px solid var(--border);">
-        <strong>${safe}</strong>
-        <span style="display:flex;gap:0.3rem;">${act}
-        <button class="btn btn-small btn-danger" title="Удалить" onclick="protoClientDel('${pname}','${safe}')">×</button></span>
-      </div>`;
-    }).join('') || '<span style="color:var(--text-muted);">Нет клиентов</span>';
-  } catch(e) { console.error(e); }
-}
-
-async function protoClientAdd(pname) {
-  const inp = document.getElementById('pc-new-' + pname);
-  const cname = inp.value.trim();
-  if (!cname) { alert('Введите имя клиента'); return; }
-  showLoader('Создание клиента...');
-  try {
-    const r = await fetch(`${BASE_URL}/api/protocols/clients/${pname}/add`, {
-      method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: cname})
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'Ошибка');
-    inp.value = '';
-    await loadProtoClients(pname);
-  } catch(e) { alert('❌ ' + e.message); }
-  finally { hideLoader(); }
-}
-
-async function protoClientDel(pname, cname) {
-  if (!confirm(`Удалить клиента ${cname}?`)) return;
-  showLoader('Удаление клиента...');
-  try {
-    const r = await fetch(`${BASE_URL}/api/protocols/clients/${pname}/del`, {
-      method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: cname})
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'Ошибка');
-    await loadProtoClients(pname);
-  } catch(e) { alert('❌ ' + e.message); }
-  finally { hideLoader(); }
-}
-
-async function protoCascade(pname) {
-  const ip = prompt('IP-адрес SERVER-B (выходной сервер):');
-  if (!ip) return;
-  const port = prompt('SSH-порт SERVER-B:', '22') || '22';
-  const user = prompt('SSH-пользователь SERVER-B:', 'root') || 'root';
-  const password = prompt('SSH-пароль SERVER-B (не сохраняется, используется один раз):');
-  if (!password) { alert('Без пароля настройка невозможна'); return; }
-  showLoader('Настройка каскада A → B... (может занять несколько минут)');
-  try {
-    const r = await fetch(`${BASE_URL}/api/protocols/cascade/${pname}`, {
-      method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ip, port: parseInt(port, 10), user, password})
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'Ошибка');
-    alert('✅ ' + (d.message || 'Каскад настроен'));
-    if (pname === 'amneziawg') setTimeout(() => location.reload(), 1500);
-  } catch(e) { alert('❌ ' + e.message); }
-  finally { hideLoader(); loadProtocols(); }
 }
 
 async function protoAction(name, action, title) {
@@ -1209,6 +1121,32 @@ async function loadServers() {
   } catch (e) { console.error(e); }
 }
 
+async function loadBackups() {
+  const el = document.getElementById('backups-list');
+  if (!el) return;
+  try {
+    const r = await fetch(BASE_URL + '/api/backups', {credentials:'same-origin'});
+    if (!r.ok) { el.innerHTML = ''; return; }
+    const list = await r.json();
+    el.innerHTML = list.map(b =>
+      `<div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;padding:0.3rem 0;border-bottom:1px solid var(--border);">
+        <span>${escapeHtml(b.date)} · ${escapeHtml(b.size)}</span>
+        <a class="btn btn-small" href="${BASE_URL}/api/backup/download/${b.name}">⬇ Скачать</a>
+      </div>`).join('') || '<span style="color:var(--text-muted);">Бэкапов пока нет</span>';
+  } catch (e) { console.error(e); }
+}
+
+async function backupCreate() {
+  showLoader('Создание бэкапа...');
+  try {
+    const r = await fetch(BASE_URL + '/api/backup/create', {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    await loadBackups();
+  } catch (e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
+}
+
 async function addServer() {
   const ip = document.getElementById('add-ip').value.trim();
   const port = parseInt(document.getElementById('add-port').value) || 22;
@@ -1323,7 +1261,6 @@ def render_page(clients, message="", error=""):
             .replace("__SERVERS_TAB__", servers_tab)
             .replace("__PROTO_HOST__", proto_host)
             .replace("__AWG_HINT__", awg_hint)
-            .replace("__MODE__", INSTALL_MODE)
             .replace("__COUNT__", str(len(clients)))
             .replace("__TOTAL_RX__", trx)
             .replace("__TOTAL_TX__", ttx)
@@ -1465,14 +1402,12 @@ async def api_clients(request: Request):
     return JSONResponse(data)
 
 # --- API протоколов (amneziawg — основной; остальные — дополнительные) ---
-PROTOCOLS = ["amneziawg", "xray-vless", "mtproxy", "tor-site", "amnezia-dns", "openvpn", "ipsec", "wireguard"]
+PROTOCOLS = ["amneziawg", "amnezia-dns", "mtproxy", "telemt"]
 # Дополнительные действия протоколов помимо install/remove
 PROTO_EXTRA_ACTIONS = {"amnezia-dns": ("use-for-clients", "use-cloudflare", "adblock-on", "adblock-off"),
-                       "xray-vless": ("direct",)}
-# Протоколы, для которых доступна настройка каскада A→B из панели
-PROTO_CASCADE = ("amneziawg", "xray-vless")
-# Зависимости: протокол -> какой протокол должен быть установлен
-PROTO_DEPS = {"amnezia-dns": "amneziawg", "wireguard": "amneziawg"}
+                       "amneziawg": ("update",)}
+# Основной протокол ставится deploy.sh — из панели его нельзя установить/удалить
+PROTO_CORE = ("amneziawg",)
 
 def _proto_status(name):
     ok, out, err = srv_exec(f"/usr/local/bin/amnezia-proto-{name}.sh status", timeout=15)
@@ -1491,180 +1426,77 @@ def _proto_status(name):
 async def api_protocols(request: Request):
     current_user(request)
     result = await run_in_threadpool(lambda: [_proto_status(p) for p in PROTOCOLS])
-    # Зависимости карточек (например, DNS и WireGuard требуют AmneziaWG)
-    by_name = {p["name"]: p for p in result}
-    for p in result:
-        dep = PROTO_DEPS.get(p["name"])
-        if dep:
-            p["dep"] = by_name.get(dep, {}).get("title", dep)
-            p["dep_met"] = bool(by_name.get(dep, {}).get("installed"))
     return JSONResponse(result)
 
 @app.post("/api/protocols/{action}/{name}")
 async def api_proto_action(request: Request, action: str, name: str):
     current_user(request)
-    allowed = ("install", "remove") + PROTO_EXTRA_ACTIONS.get(name, ())
+    allowed = PROTO_EXTRA_ACTIONS.get(name, ()) + (() if name in PROTO_CORE else ("install", "remove"))
     if name not in PROTOCOLS or action not in allowed:
         return JSONResponse({"error": "Неизвестная операция"}, status_code=400)
-    dep = PROTO_DEPS.get(name)
-    if dep and action == "install":
-        dep_st = await run_in_threadpool(_proto_status, dep)
-        if not dep_st.get("installed"):
-            return JSONResponse({"error": f"Сначала установите: {dep_st.get('title', dep)}"}, status_code=400)
     ok, out, err = await run_in_threadpool(
         srv_exec, f"/usr/local/bin/amnezia-proto-{name}.sh {action}", 600)
     if not ok:
         tail = ((err or "") + (out or "")).strip()[-400:]
         return JSONResponse({"error": tail or "Ошибка операции"}, status_code=500)
     _notify(f"🧩 <b>Протокол {name}</b>\nОперация: {action} — OK")
+    if action in ("install", "remove"):
+        _backup_async()
     link = ""
     if action == "install":
         link = _proto_status(name).get("link", "")
     return {"ok": True, "link": link}
 
-# --- Клиенты протоколов (xray-vless, wireguard, ipsec, openvpn) ---
-def _proto_clients(name):
-    ok, out, _ = srv_exec(f"/usr/local/bin/amnezia-proto-{name}.sh clients", timeout=30)
-    if not ok and not (out or "").strip():
-        return None
+# --- Бэкапы SERVER-A ---
+BACKUP_DIR = "/root/amnezia-backups"
+
+def _list_backups():
     items = []
-    for line in (out or "").splitlines():
-        parts = line.split("\t")
-        if len(parts) != 2:
-            continue
-        cname, ref = parts
-        entry = {"name": cname}
-        if ref.startswith("file:"):
-            entry["file"] = ref[5:]
-        else:
-            entry["link"] = ref
-        items.append(entry)
+    try:
+        names = [f for f in os.listdir(BACKUP_DIR)
+                 if re.fullmatch(r"amnezia-backup-[\d-]+\.tar\.gz", f)]
+    except FileNotFoundError:
+        return []
+    for f in sorted(names, reverse=True):
+        path = os.path.join(BACKUP_DIR, f)
+        st = os.stat(path)
+        items.append({"name": f,
+                      "size": f"{st.st_size / 1024 / 1024:.1f} МБ",
+                      "date": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%d.%m.%Y %H:%M")})
     return items
 
-@app.get("/api/protocols/clients/{name}")
-async def api_proto_clients(request: Request, name: str):
-    current_user(request)
-    if name not in PROTOCOLS:
-        raise HTTPException(404, "Неизвестный протокол")
-    items = await run_in_threadpool(_proto_clients, name)
-    if items is None:
-        return JSONResponse({"error": "Протокол не поддерживает клиентов или недоступен"}, status_code=400)
-    return JSONResponse(items)
-
-@app.post("/api/protocols/clients/{name}/add")
-async def api_proto_client_add(request: Request, name: str):
-    current_user(request)
-    if name not in PROTOCOLS:
-        raise HTTPException(404, "Неизвестный протокол")
-    body = await request.json()
-    cname = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("name", "")))
-    if not cname:
-        return JSONResponse({"error": "Имя: только латиница, цифры, _ -"}, status_code=400)
-    ok, out, err = await run_in_threadpool(
-        srv_exec, f"/usr/local/bin/amnezia-proto-{name}.sh add-client {shlex.quote(cname)}", 120)
-    if not ok:
-        tail = ((err or "") + (out or "")).strip()[-300:]
-        return JSONResponse({"error": tail or "Ошибка создания клиента"}, status_code=500)
-    _notify(f"👤 <b>Новый клиент {name}</b>\nИмя: <code>{cname}</code>")
-    return {"ok": True}
-
-@app.post("/api/protocols/clients/{name}/del")
-async def api_proto_client_del(request: Request, name: str):
-    current_user(request)
-    if name not in PROTOCOLS:
-        raise HTTPException(404, "Неизвестный протокол")
-    body = await request.json()
-    cname = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("name", "")))
-    if not cname:
-        return JSONResponse({"error": "Недопустимое имя"}, status_code=400)
-    ok, out, err = await run_in_threadpool(
-        srv_exec, f"/usr/local/bin/amnezia-proto-{name}.sh remove-client {shlex.quote(cname)}", 60)
-    if not ok:
-        tail = ((err or "") + (out or "")).strip()[-300:]
-        return JSONResponse({"error": tail or "Ошибка удаления клиента"}, status_code=500)
-    _notify(f"🗑️ <b>Клиент {name} удалён</b>\nИмя: <code>{cname}</code>")
-    return {"ok": True}
-
-@app.get("/api/protocols/client-file/{name}/{cname}")
-async def api_proto_client_file(request: Request, name: str, cname: str):
-    """Скачивание файла клиента протокола (.ovpn, .conf, .txt)."""
-    current_user(request)
-    if name not in PROTOCOLS:
-        raise HTTPException(404, "Неизвестный протокол")
-    cn = re.sub(r"[^a-zA-Z0-9_-]", "", cname)
-    items = await run_in_threadpool(_proto_clients, name)
-    fpath = next((i.get("file") for i in (items or []) if i["name"] == cn), None)
-    if not fpath or ".." in fpath or not fpath.startswith("/etc/amnezia-protocols/"):
-        raise HTTPException(404, "Файл не найден")
-    content = await run_in_threadpool(srv_read, fpath)
-    if content is None:
-        raise HTTPException(404, "Файл не найден (или сервер недоступен)")
-    return Response(content=content, media_type="application/octet-stream",
-                    headers={"Content-Disposition": f'attachment; filename="{os.path.basename(fpath)}"'})
-
-def _run_cascade(name, ip, port, user, password):
-    """Настройка каскада A→B. Пароль живёт только в env процесса, не сохраняется."""
-    env = dict(os.environ)
-    env["SSHPASS"] = password
-    if name == "amneziawg":
-        env.update({"CASCADE_B_IP": ip, "CASCADE_B_PORT": str(port), "CASCADE_B_USER": user})
-        cmd = ["/usr/local/bin/amnezia-cascade-setup.sh"]
-    else:
-        cmd = ["/usr/local/bin/amnezia-proto-xray-vless.sh", "cascade", ip, str(port), user]
+def _backup_async():
+    """Фоновый бэкап после изменений (клиенты, протоколы)."""
     try:
-        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=900,
-                           stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return False, "Операция превысила таймаут (15 минут)"
-    except Exception as e:
-        return False, str(e)
-    if r.returncode != 0:
-        return False, ((r.stdout or "") + (r.stderr or "")).strip()[-500:]
-    return True, "Каскад настроен и работает"
+        subprocess.Popen(["/usr/local/bin/amnezia-backup.sh"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
-@app.post("/api/protocols/cascade/{name}")
-async def api_proto_cascade(request: Request, name: str):
+@app.get("/api/backups")
+async def api_backups(request: Request):
     current_user(request)
-    if name not in PROTO_CASCADE:
-        return JSONResponse({"error": "Каскад для этого протокола не поддерживается"}, status_code=400)
-    if REMOTE_MODE:
-        return JSONResponse({"error": "В режиме 2 каскад настраивается с сервера протоколов"}, status_code=400)
-    if name == "amneziawg" and INSTALL_MODE == "3":
-        return JSONResponse({"error": "Каскад AmneziaWG уже настроен"}, status_code=400)
-    body = await request.json()
-    ip = str(body.get("ip", "")).strip()
-    port = int(body.get("port", 22))
-    user = re.sub(r"[^a-zA-Z0-9_.-]", "", str(body.get("user", "root"))) or "root"
-    password = str(body.get("password", ""))
-    if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip):
-        return JSONResponse({"error": "Некорректный IP"}, status_code=400)
-    if not (1 <= port <= 65535):
-        return JSONResponse({"error": "Некорректный порт"}, status_code=400)
-    if not password:
-        return JSONResponse({"error": "Требуется SSH-пароль SERVER-B"}, status_code=400)
-    ok, msg = await run_in_threadpool(_run_cascade, name, ip, port, user, password)
-    if ok:
-        _notify(f"🔗 <b>Каскад {name}</b>\nSERVER-B: <code>{ip}</code>\nРезультат: OK")
-        return {"ok": True, "message": msg}
-    _notify(f"❌ <b>Ошибка каскада {name}</b>\nSERVER-B: <code>{ip}</code>\n{msg[:300]}")
-    return JSONResponse({"error": msg}, status_code=500)
+    return JSONResponse(await run_in_threadpool(_list_backups))
 
-@app.get("/api/protocols/config/{name}")
-async def api_proto_config(request: Request, name: str):
-    """Скачивание клиентского файла протокола (.ovpn, .conf, данные IKEv2)."""
+@app.post("/api/backup/create")
+async def api_backup_create(request: Request):
     current_user(request)
-    if name not in PROTOCOLS:
-        raise HTTPException(404, "Неизвестный протокол")
-    st = await run_in_threadpool(_proto_status, name)
-    fpath = st.get("file", "")
-    if not fpath or not fpath.startswith(("/etc/amnezia-protocols/", "/root/clients/")):
+    ok, out, err = await run_in_threadpool(srv_exec, "/usr/local/bin/amnezia-backup.sh", 300)
+    if not ok:
+        tail = ((err or "") + (out or "")).strip()[-300:]
+        return JSONResponse({"error": tail or "Ошибка бэкапа"}, status_code=500)
+    _notify("💾 <b>Бэкап создан</b> (вручную из панели)")
+    return {"ok": True}
+
+@app.get("/api/backup/download/{fname}")
+async def api_backup_download(request: Request, fname: str):
+    current_user(request)
+    if not re.fullmatch(r"amnezia-backup-[\d-]+\.tar\.gz", fname):
+        raise HTTPException(400, "Некорректное имя файла")
+    path = os.path.join(BACKUP_DIR, fname)
+    if not os.path.isfile(path):
         raise HTTPException(404, "Файл не найден")
-    content = await run_in_threadpool(srv_read, fpath)
-    if content is None:
-        raise HTTPException(404, "Файл не найден (или сервер недоступен)")
-    fname = os.path.basename(fpath)
-    return Response(content=content, media_type="application/octet-stream",
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    return FileResponse(path, media_type="application/gzip", filename=fname)
 
 # --- API Локальной Сети (LAN) ---
 @app.get("/api/lan/status")
@@ -1833,6 +1665,7 @@ async def create_client(request: Request, name: str = Form(...)):
     _clients_cache["ts"] = 0.0
     if ok:
         _notify(f"👤 <b>Новый клиент</b> (через панель)\nИмя: <code>{n}</code>")
+        _backup_async()
         return RedirectResponse(f"{BASE_URL}/?message=Клиент+{n}+создан", status_code=303)
     tail = ((err or "") + (out or "")).strip()[:200] or "error"
     return RedirectResponse(f"{BASE_URL}/?error={tail.replace(' ','+').replace(chr(10),' ')}", status_code=303)
@@ -1846,6 +1679,7 @@ async def delete_client(request: Request, name: str):
     _clients_cache["ts"] = 0.0
     if ok:
         _notify(f"🗑️ <b>Клиент удалён</b> (через панель)\nИмя: <code>{n}</code>")
+        _backup_async()
         return RedirectResponse(f"{BASE_URL}/?message=Клиент+{n}+удалён", status_code=303)
     tail = ((err or "") + (out or "")).strip()[:200] or "error"
     return RedirectResponse(f"{BASE_URL}/?error={tail.replace(' ','+').replace(chr(10),' ')}", status_code=303)

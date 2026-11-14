@@ -36,12 +36,14 @@ for f in \
     "$CASCADE_ENV" \
     /etc/amnezia-panel.conf \
     /etc/amnezia-stealth.conf \
+    /etc/amnezia-backup-cloud.conf \
     /var/lib/amnezia-panel/servers.json
 do
     [[ -f "$f" ]] && FILES+=("${f#/}")
 done
 [[ -d /root/clients ]] && FILES+=("root/clients")
 [[ -d /etc/amnezia-panel-ssl ]] && FILES+=("etc/amnezia-panel-ssl")
+[[ -d /etc/amnezia-protocols ]] && FILES+=("etc/amnezia-protocols")
 
 [[ ${#FILES[@]} -eq 0 ]] && { echo "Ошибка: нечего бэкапить"; exit 1; }
 
@@ -64,5 +66,17 @@ if [[ -n "$BK_HOST" && -f /root/.ssh/id_ed25519 ]]; then
         echo "Копия отправлена на $BK_HOST:$BACKUP_DIR"
     else
         echo "[WARN] $BK_HOST недоступен по SSH-ключу — только локальная копия" >&2
+    fi
+fi
+
+# === Выгрузка в облако (rclone), если настроено amnezia-backup-cloud.sh ===
+CLOUD_CONF="/etc/amnezia-backup-cloud.conf"
+if [[ -f "$CLOUD_CONF" ]] && command -v rclone >/dev/null 2>&1; then
+    RCLONE_REMOTE=""
+    source "$CLOUD_CONF"
+    if [[ -n "${RCLONE_REMOTE:-}" ]]; then
+        rclone copy "$ARCHIVE" "$RCLONE_REMOTE:amnezia-backups" --quiet \
+            && echo "Копия выгружена в облако: $RCLONE_REMOTE:amnezia-backups" \
+            || echo "[WARN] выгрузка в облако не удалась" >&2
     fi
 fi
