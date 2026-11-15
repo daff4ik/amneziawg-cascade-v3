@@ -355,7 +355,7 @@ def main():
                 except Exception as e:
                     log(f"callback: {e}")
                 continue
-            msg = upd.get("message") or {}
+            msg = upd.get("message") or upd.get("channel_post") or {}
             text = (msg.get("text") or "").strip()
             chat_id = str(msg.get("chat", {}).get("id", ""))
             if not text:
