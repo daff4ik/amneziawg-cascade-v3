@@ -347,6 +347,7 @@ def main():
             if cb:
                 chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
                 if chat_id not in ALLOWED:
+                    log(f"IGNORED callback chat={chat_id} (добавьте в TELEGRAM_BOT_ALLOWED)")
                     continue
                 try:
                     api("answerCallbackQuery", callback_query_id=cb["id"])
@@ -357,7 +358,10 @@ def main():
             msg = upd.get("message") or {}
             text = (msg.get("text") or "").strip()
             chat_id = str(msg.get("chat", {}).get("id", ""))
-            if not text or chat_id not in ALLOWED:
+            if not text:
+                continue
+            if chat_id not in ALLOWED:
+                log(f"IGNORED chat={chat_id} text={text[:30]!r} (добавьте в TELEGRAM_BOT_ALLOWED)")
                 continue
             if time.time() - msg.get("date", 0) > MAX_MSG_AGE:
                 continue
