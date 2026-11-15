@@ -65,7 +65,7 @@ Description=MTProxy (mtg)
 After=network.target
 
 [Service]
-ExecStart=$MTG_BIN simple-run -b 0.0.0.0:$PORT $SECRET
+ExecStart=$MTG_BIN simple-run 0.0.0.0:$PORT $SECRET
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
