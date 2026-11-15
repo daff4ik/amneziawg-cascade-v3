@@ -51,6 +51,22 @@ Ping: OK, handshake: ${age}s
     exit 0
 fi
 
+# Второй шанс: кратковременная потеря UDP-пакетов — не повод для рестарта
+sleep 20
+[[ $ping_ok -eq 0 ]] && ping -c 3 -W 3 "$TUNNEL_IP" >/dev/null 2>&1 && ping_ok=1
+if [[ "$IPV6_ENABLED" == "1" && $ping6_ok -eq 0 ]]; then
+    ping -6 -c 3 -W 3 "$TUNNEL_IP6" >/dev/null 2>&1 && ping6_ok=1
+fi
+hs=$(awg show awg0 latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
+if [[ -n "$hs" && "$hs" != "0" ]]; then
+    age=$(( $(date +%s) - hs ))
+    (( age <= MAX_HANDSHAKE_AGE )) && hs_ok=1
+fi
+if [[ "$svc" == "active" && $ping_ok -eq 1 && $ping6_ok -eq 1 && $hs_ok -eq 1 ]]; then
+    log "TRANSIENT: вторая проверка OK (svc=$svc)"
+    exit 0
+fi
+
 log "PROBLEM svc=$svc ping=$ping_ok ping6=$ping6_ok hs=$hs_ok age=$age"
 
 if ! was_down; then
@@ -65,13 +81,18 @@ Handshake: $([[ $hs_ok -eq 1 ]] && echo OK || echo FAIL) (${age}s)
 fi
 
 systemctl restart awg-quick@awg0
-sleep 5
 
-recheck_ok=1
-ping -c 3 -W 3 "$TUNNEL_IP" >/dev/null 2>&1 || recheck_ok=0
-if [[ "$IPV6_ENABLED" == "1" ]]; then
-    ping -6 -c 3 -W 3 "$TUNNEL_IP6" >/dev/null 2>&1 || recheck_ok=0
-fi
+# Первый handshake с обфускацией не мгновенный — проверяем до ~40 сек
+recheck_ok=0
+for _ in $(seq 1 8); do
+    sleep 5
+    recheck_ok=1
+    ping -c 2 -W 2 "$TUNNEL_IP" >/dev/null 2>&1 || recheck_ok=0
+    if [[ "$IPV6_ENABLED" == "1" ]]; then
+        ping -6 -c 2 -W 2 "$TUNNEL_IP6" >/dev/null 2>&1 || recheck_ok=0
+    fi
+    [[ $recheck_ok -eq 1 ]] && break
+done
 
 if [[ $recheck_ok -eq 1 ]]; then
     mark_up

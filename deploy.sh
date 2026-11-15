@@ -275,6 +275,7 @@ SCRIPTS_TO_DOWNLOAD=(
     amnezia-healthcheck.sh
     amnezia-traffic-collector.py
     amnezia-vpn-link.py
+    amnezia-tg-bot.py
     amnezia-panel-access.sh
     amnezia-server-install.sh
     amnezia-backup.sh
@@ -796,6 +797,33 @@ if [[ -x /usr/local/bin/amnezia-traffic-collector.py ]]; then
 EOF
     chmod 644 /etc/cron.d/amnezia-traffic
     /usr/local/bin/amnezia-traffic-collector.py 2>/dev/null || true
+fi
+
+# === Telegram-бот управления (команды из чата) ===
+if [[ -f /usr/local/bin/amnezia-tg-bot.py ]]; then
+    chmod +x /usr/local/bin/amnezia-tg-bot.py
+    cat > /etc/systemd/system/amnezia-tg-bot.service <<'EOF'
+[Unit]
+Description=Amnezia Telegram control bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/amnezia-tg-bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    if [[ -f /etc/amnezia-notify.conf ]]; then
+        systemctl enable amnezia-tg-bot >/dev/null 2>&1 || true
+        systemctl restart amnezia-tg-bot
+        ok "Telegram-бот управления запущен"
+    else
+        systemctl disable --now amnezia-tg-bot 2>/dev/null || true
+    fi
 fi
 
 # === Ежедневный бэкап (локально + копия на SERVER-B по SSH-ключу) ===

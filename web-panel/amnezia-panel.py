@@ -1358,6 +1358,10 @@ async def api_notify_save(request: Request):
         os.chmod(NOTIFY_CONF, 0o600)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    # После настройки уведомлений запускаем/перезапускаем бота управления
+    if os.path.exists("/etc/systemd/system/amnezia-tg-bot.service"):
+        await run_in_threadpool(
+            srv_exec, "systemctl enable amnezia-tg-bot >/dev/null 2>&1; systemctl restart amnezia-tg-bot", 30)
     _notify("🔔 <b>Telegram-уведомления</b>\nНастройки обновлены через веб-панель.")
     return {"ok": True}
 
