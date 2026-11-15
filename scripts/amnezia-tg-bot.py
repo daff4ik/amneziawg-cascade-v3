@@ -38,8 +38,9 @@ CFG = load_conf(CONF)
 TOKEN = CFG.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED = set()
 for cid in re.split(r"[,\s]+", CFG.get("TELEGRAM_CHAT_ID", "") + " " + CFG.get("TELEGRAM_BOT_ALLOWED", "")):
-    if cid.strip():
-        ALLOWED.add(cid.strip())
+    cid = cid.strip().strip("\\").strip('"').strip("'").strip()
+    if cid:
+        ALLOWED.add(cid)
 
 # URL панели для Mini App (если настроен stealth на домене)
 _stealth = load_conf(STEALTH_CONF)
@@ -71,14 +72,15 @@ def kb(rows):
 def btn(text, cb):
     return {"text": text, "callback_data": cb}
 
-def main_menu_kb():
+def main_menu_kb(is_channel=False):
     rows = [
         [btn("📊 Статус", "status"), btn("👥 Клиенты", "clients")],
         [btn("➕ Добавить клиента", "add"), btn("➖ Удалить клиента", "del_menu")],
         [btn("🔄 Рестарт туннелей", "restart"), btn("💾 Бэкап", "backup")],
         [btn("⚙️ Ещё", "more")],
     ]
-    if PANEL_URL:
+    # web_app-кнопки Telegram запрещает в каналах — там сообщение целиком падает с 400
+    if PANEL_URL and not is_channel:
         rows.insert(3, [{"text": "🖥 Открыть панель (Mini App)", "web_app": {"url": PANEL_URL}}])
     return kb(rows)
 
@@ -98,8 +100,8 @@ def send(chat_id, text, markup=None):
         except Exception as e:
             log(f"sendMessage: {e}")
 
-def show_menu(chat_id):
-    send(chat_id, "<b>⚙️ Управление VPN</b>\nВыберите действие:", main_menu_kb())
+def show_menu(chat_id, is_channel=False):
+    send(chat_id, "<b>⚙️ Управление VPN</b>\nВыберите действие:", main_menu_kb(is_channel))
 
 def send_doc(chat_id, path, caption=""):
     boundary = "----amneziabot"
@@ -208,7 +210,7 @@ def do_backup(chat_id):
 
 # ==================== Обработчики ====================
 
-def handle_text(chat_id, text):
+def handle_text(chat_id, text, is_channel=False):
     # Ответ на вопрос бота (например, имя нового клиента)
     pend = PENDING.get(chat_id)
     if pend and time.time() - pend[1] < PENDING_TTL and not text.startswith("/"):
@@ -222,7 +224,7 @@ def handle_text(chat_id, text):
     arg = parts[1].strip() if len(parts) > 1 else ""
     log(f"cmd={cmd} arg={arg} chat={chat_id}")
     if cmd in ("/start", "/menu"):
-        show_menu(chat_id)
+        show_menu(chat_id, is_channel)
     elif cmd == "/help":
         send(chat_id, HELP, back_kb())
     elif cmd == "/status":
@@ -256,11 +258,11 @@ def handle_text(chat_id, text):
     else:
         send(chat_id, "Неизвестная команда. /menu — кнопки, /help — список команд")
 
-def handle_callback(chat_id, qid, data):
+def handle_callback(chat_id, qid, data, is_channel=False):
     log(f"cb={data} chat={chat_id}")
     if data == "menu":
         PENDING.pop(chat_id, None)
-        show_menu(chat_id)
+        show_menu(chat_id, is_channel)
     elif data == "more":
         send(chat_id, "<b>Дополнительно:</b>", kb([
             [btn("🖥 Рестарт панели", "restart_panel"), btn("⚠️ Перезагрузка сервера", "reboot")],
@@ -320,6 +322,10 @@ def setup_bot():
         log(f"setMyCommands: {e}")
     if PANEL_URL:
         for cid in ALLOWED:
+            # Кнопка у поля ввода работает только в личных чатах (положительный id);
+            # для групп/каналов API возвращает 400
+            if not cid.isdigit():
+                continue
             try:
                 api("setChatMenuButton", chat_id=cid,
                     menu_button=json.dumps({"type": "web_app", "text": "🖥 Панель",
@@ -345,19 +351,22 @@ def main():
             offset = upd["update_id"] + 1
             cb = upd.get("callback_query")
             if cb:
-                chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+                chat = cb.get("message", {}).get("chat", {})
+                chat_id = str(chat.get("id", ""))
                 if chat_id not in ALLOWED:
                     log(f"IGNORED callback chat={chat_id} (добавьте в TELEGRAM_BOT_ALLOWED)")
                     continue
                 try:
                     api("answerCallbackQuery", callback_query_id=cb["id"])
-                    handle_callback(chat_id, cb["id"], cb.get("data", ""))
+                    handle_callback(chat_id, cb["id"], cb.get("data", ""),
+                                    chat.get("type") == "channel")
                 except Exception as e:
                     log(f"callback: {e}")
                 continue
             msg = upd.get("message") or upd.get("channel_post") or {}
             text = (msg.get("text") or "").strip()
-            chat_id = str(msg.get("chat", {}).get("id", ""))
+            chat = msg.get("chat", {})
+            chat_id = str(chat.get("id", ""))
             if not text:
                 continue
             if chat_id not in ALLOWED:
@@ -366,7 +375,7 @@ def main():
             if time.time() - msg.get("date", 0) > MAX_MSG_AGE:
                 continue
             try:
-                handle_text(chat_id, text)
+                handle_text(chat_id, text, chat.get("type") == "channel")
             except Exception as e:
                 log(f"handle_text: {e}")
                 send(chat_id, f"❌ Внутренняя ошибка: {esc(str(e))}")
