@@ -879,7 +879,7 @@ async function loadProtocols() {
         : `<span class="status-badge status-never">не установлен</span>`;
       let body = '';
       if (p.installed) {
-        body = `<div style="font-size:0.9rem;margin:0.5rem 0;">Порт: <code>${escapeHtml(p.port || '—')}</code></div>`;
+        body = `<div style="font-size:0.9rem;margin:0.5rem 0;">Порт: <code>${escapeHtml(p.port || '—')}</code>${p.domain ? ` · маскировка: <code>${escapeHtml(p.domain)}</code>` : ''}</div>`;
         if (p.link) {
           body += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:0.6rem;font-size:0.8rem;word-break:break-all;margin-bottom:0.5rem;"><code>${escapeHtml(p.link)}</code></div>
           <button class="btn btn-small" onclick="navigator.clipboard.writeText('${p.link.replace(/'/g, "\\'")}').then(()=>alert('Ссылка скопирована'))">📋 Копировать ссылку</button> `;
@@ -900,13 +900,25 @@ async function loadProtocols() {
           </div>
           <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem;">После переключения DNS клиенты должны заново импортировать конфиг / vpn:// ссылку. Блокировка рекламы применяется сразу.</div>`;
         }
+        if (p.name === 'mtproxy' || p.name === 'telemt') {
+          body += `<button class="btn btn-small" onclick="protoAction('${p.name}','restart','перезапуск ${escapeHtml(p.title)}')">🔄 Перезапустить</button> `;
+        }
         if (p.name !== 'amneziawg') {
           body += `<button class="btn btn-small btn-danger" onclick="protoAction('${p.name}','remove','${escapeHtml(p.title)}')">Удалить</button>`;
         }
       } else {
         body = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem;">${escapeHtml(p.error || '')}</div>`;
         if (p.name !== 'amneziawg') {
-          body += `<button class="btn btn-small btn-primary" onclick="protoAction('${p.name}','install','${escapeHtml(p.title)}')">Установить</button>`;
+          if (p.name === 'mtproxy' || p.name === 'telemt') {
+            const defDomain = p.name === 'mtproxy' ? 'www.google.com' : 'www.microsoft.com';
+            body += `<div style="margin-bottom:0.5rem;">
+              <input type="text" id="proto-domain-${p.name}" placeholder="${defDomain}" style="padding:0.45rem 0.6rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);width:220px;max-width:100%;">
+              <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.25rem;">Маскировочный домен (пусто = ${defDomain}). Трафик будет выглядеть как HTTPS к этому сайту.</div>
+            </div>
+            <button class="btn btn-small btn-primary" onclick="protoInstallProxy('${p.name}','${escapeHtml(p.title)}')">Установить</button>`;
+          } else {
+            body += `<button class="btn btn-small btn-primary" onclick="protoAction('${p.name}','install','${escapeHtml(p.title)}')">Установить</button>`;
+          }
         }
       }
       return `<div style="border:1px solid var(--border);border-radius:12px;padding:1rem;margin-bottom:0.75rem;">
@@ -917,18 +929,31 @@ async function loadProtocols() {
   } catch(e) { box.innerHTML = `<div class="alert err">❌ ${escapeHtml(e.message)}</div>`; }
 }
 
-async function protoAction(name, action, title) {
+async function protoAction(name, action, title, domain) {
   if (action === 'remove' && !confirm(`Удалить ${title}?`)) return;
   if (action.startsWith('use-') && !confirm(`${title}?\nКлиентам нужно будет заново импортировать конфиг / vpn:// ссылку.`)) return;
   showLoader(action === 'install' ? `Установка ${title}... (может занять пару минут)` : `Выполнение: ${title}...`);
   try {
-    const r = await fetch(BASE_URL + `/api/protocols/${action}/${name}`, {method:'POST', credentials:'same-origin'});
+    const opts = {method:'POST', credentials:'same-origin'};
+    if (domain) {
+      opts.headers = {'Content-Type': 'application/json'};
+      opts.body = JSON.stringify({domain});
+    }
+    const r = await fetch(BASE_URL + `/api/protocols/${action}/${name}`, opts);
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Ошибка');
     if (action === 'install' && d.link) alert('✅ Установлено!\n\nСсылка для подключения:\n' + d.link);
     if (action.startsWith('use-')) alert('✅ Готово. Клиенты должны заново импортировать конфиг / vpn:// ссылку.');
   } catch(e) { alert('❌ ' + e.message); }
   finally { hideLoader(); loadProtocols(); }
+}
+
+function protoInstallProxy(name, title) {
+  const domain = (document.getElementById(`proto-domain-${name}`).value || '').trim();
+  if (domain && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(domain)) {
+    alert('Некорректный домен. Пример: www.microsoft.com'); return;
+  }
+  protoAction(name, 'install', title, domain);
 }
 
 // ==================== Telegram Notifications ====================
@@ -1409,7 +1434,12 @@ async def api_clients(request: Request):
 PROTOCOLS = ["amneziawg", "amnezia-dns", "mtproxy", "telemt"]
 # Дополнительные действия протоколов помимо install/remove
 PROTO_EXTRA_ACTIONS = {"amnezia-dns": ("use-for-clients", "use-cloudflare", "adblock-on", "adblock-off"),
-                       "amneziawg": ("update",)}
+                       "amneziawg": ("update",),
+                       "mtproxy": ("restart",),
+                       "telemt": ("restart",)}
+# Переменная окружения маскировочного домена для каждого прокси-протокола
+PROTO_DOMAIN_ENV = {"mtproxy": "MTG_DOMAIN", "telemt": "TELEMT_DOMAIN"}
+PROTO_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", re.I)
 # Основной протокол ставится deploy.sh — из панели его нельзя установить/удалить
 PROTO_CORE = ("amneziawg",)
 
@@ -1438,8 +1468,19 @@ async def api_proto_action(request: Request, action: str, name: str):
     allowed = PROTO_EXTRA_ACTIONS.get(name, ()) + (() if name in PROTO_CORE else ("install", "remove"))
     if name not in PROTOCOLS or action not in allowed:
         return JSONResponse({"error": "Неизвестная операция"}, status_code=400)
+    env_prefix = ""
+    if action == "install" and name in PROTO_DOMAIN_ENV:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        domain = str(body.get("domain") or "").strip().lower()
+        if domain:
+            if len(domain) > 253 or not PROTO_DOMAIN_RE.fullmatch(domain):
+                return JSONResponse({"error": "Некорректный домен (пример: www.microsoft.com)"}, status_code=400)
+            env_prefix = f"{PROTO_DOMAIN_ENV[name]}={domain} "
     ok, out, err = await run_in_threadpool(
-        srv_exec, f"/usr/local/bin/amnezia-proto-{name}.sh {action}", 600)
+        srv_exec, f"{env_prefix}/usr/local/bin/amnezia-proto-{name}.sh {action}", 600)
     if not ok:
         tail = ((err or "") + (out or "")).strip()[-400:]
         return JSONResponse({"error": tail or "Ошибка операции"}, status_code=500)

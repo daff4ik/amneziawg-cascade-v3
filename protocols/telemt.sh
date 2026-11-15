@@ -5,7 +5,7 @@
 #  под HTTPS выбранного домена). Ссылка tg://proxy открывается
 #  прямо в Telegram. Используется официальный установщик telemt.
 #
-#  Команды: install | remove | status
+#  Команды: install | remove | restart | status
 #  Переменные окружения (опционально):
 #    TELEMT_PORT (по умолчанию 8445), TELEMT_DOMAIN (маскировочный домен),
 #    ENDPOINT_HOST (адрес для ссылки, иначе — внешний IP сервера)
@@ -96,6 +96,14 @@ do_remove() {
     ok "$TITLE удалён"
 }
 
+do_restart() {
+    [[ -f "$STATE_FILE" ]] || { err "$TITLE не установлен"; exit 1; }
+    systemctl restart telemt
+    sleep 1
+    systemctl is-active --quiet telemt || { err "telemt не запустился: journalctl -u telemt"; exit 1; }
+    ok "$TITLE перезапущен"
+}
+
 do_status() {
     if [[ -f "$STATE_FILE" ]]; then
         source "$STATE_FILE"
@@ -104,6 +112,7 @@ do_status() {
         echo "state=$STATE"
         echo "title=$TITLE"
         echo "port=$PORT"
+        echo "domain=$DOMAIN"
         echo "link=$CLIENT_LINK"
     else
         echo "installed=0"
@@ -114,6 +123,7 @@ do_status() {
 case "${1:-status}" in
     install) do_install ;;
     remove)  do_remove ;;
+    restart) do_restart ;;
     status)  do_status ;;
-    *) echo "Использование: $0 install|remove|status"; exit 1 ;;
+    *) echo "Использование: $0 install|remove|restart|status"; exit 1 ;;
 esac

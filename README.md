@@ -64,10 +64,12 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/daff4ik/amneziawg-c
 То же самое из консоли SERVER-A:
 ```bash
 sudo amnezia-proto-amnezia-dns.sh install   # install | remove | status
-sudo amnezia-proto-mtproxy.sh install
-sudo amnezia-proto-telemt.sh install
+sudo amnezia-proto-mtproxy.sh install       # install | remove | restart | status
+sudo amnezia-proto-telemt.sh install        # install | remove | restart | status
 ```
-Необязательные параметры — через окружение: `MTG_PORT`, `MTG_DOMAIN`, `TELEMT_PORT`, `TELEMT_DOMAIN`, `ENDPOINT_HOST`.
+Необязательные параметры — через окружение: `MTG_PORT`, `MTG_DOMAIN`, `TELEMT_PORT`, `TELEMT_DOMAIN`, `ENDPOINT_HOST`. Маскировочный домен можно задать и прямо в панели при установке MTProxy/Telemt (поле над кнопкой «Установить»). Учтите: секрет зашивает домен внутрь ссылки — при смене домена переустановите протокол и раздайте клиентам новую ссылку.
+
+Если прокси периодически «отваливается», а `journalctl -u mtg` показывает `cannot dial to the fronting domain` — у хостера перебои с DNS. Привяжите маскировочный домен к IP: `echo "142.251.154.119 www.google.com" | sudo tee -a /etc/hosts && sudo systemctl restart mtg`.
 
 ## ⬆ Обновление AmneziaWG до новой версии
 
