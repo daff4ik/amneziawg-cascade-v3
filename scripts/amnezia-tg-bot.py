@@ -134,6 +134,17 @@ def client_names():
     except FileNotFoundError:
         return []
 
+def server_name():
+    # Имя сервера зашито deploy.sh в скрипт добавления клиентов
+    try:
+        with open("/usr/local/bin/amnezia-add-client.sh", encoding="utf-8") as f:
+            m = re.search(r'^SERVER_NAME="([^"]+)"', f.read(), re.M)
+            if m and m.group(1) and not m.group(1).startswith("__"):
+                return m.group(1)
+    except Exception:
+        pass
+    return "VPN"
+
 HELP = """<b>Команды бота:</b> (или просто кнопки меню /menu)
 /status — состояние туннеля
 /clients — список клиентов
@@ -185,7 +196,7 @@ def do_add(chat_id, name):
         send_doc(chat_id, conf, caption=f"{name}.conf — импорт в AmneziaVPN")
     except Exception as e:
         log(f"send_doc: {e}")
-    rc2, link = run(["/usr/local/bin/amnezia-vpn-link.py", conf, "VPN"], timeout=15)
+    rc2, link = run(["/usr/local/bin/amnezia-vpn-link.py", conf, server_name()], timeout=15)
     if rc2 == 0 and link.strip():
         send(chat_id, "🔗 <code>" + esc(link.strip()) + "</code>")
 
