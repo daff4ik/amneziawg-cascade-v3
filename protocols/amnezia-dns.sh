@@ -187,5 +187,5 @@ case "${1:-status}" in
             echo "title=$TITLE"
         fi
         ;;
-    *) echo "Использование: $0 install|remove|status|use-for-clients|use-cloudflare|adblock-on|adblock-off"; exit 1 ;;
+    *) echo "Использование: $0 install|remove|status|use-for-clients|use-cloudflare|adblock-on|adblock-off|adblock-update"; exit 1 ;;
 esac

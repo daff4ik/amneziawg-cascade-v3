@@ -406,23 +406,26 @@ def enrich(clients):
             conn.close()
         except: pass
     for c in clients:
+        # handshake всегда берём из живого awg dump (свежие данные ядра),
+        # а не из sqlite-истории — иначе при остановленном коллекторе
+        # или редком опросе все клиенты ложно выглядят «офлайн»
+        live_st = live.get(c["pubkey"], {})
         if REMOTE_MODE:
-            st = live.get(c["pubkey"], {})
-            c["rx_bytes"] = st.get("rx", 0)
-            c["tx_bytes"] = st.get("tx", 0)
-            c["handshake_ts"] = st.get("hs", 0)
+            c["rx_bytes"] = live_st.get("rx", 0)
+            c["tx_bytes"] = live_st.get("tx", 0)
+            c["handshake_ts"] = live_st.get("hs", 0)
         else:
             st = db_stats.get(c["pubkey"], {})
             c["rx_bytes"] = st.get("total_rx", 0)
             c["tx_bytes"] = st.get("total_tx", 0)
-            c["handshake_ts"] = st.get("last_handshake", 0)
+            c["handshake_ts"] = live_st.get("hs") or st.get("last_handshake", 0)
         c["rx"] = fmt_bytes(c["rx_bytes"])
         c["tx"] = fmt_bytes(c["tx_bytes"])
         c["handshake"] = fmt_handshake(c["handshake_ts"])
         hs = c["handshake_ts"]
         if hs and now - hs <= 180:
             c["status"] = "ONLINE"
-        elif hs or st:
+        elif hs or c["rx_bytes"] or c["tx_bytes"]:
             c["status"] = "OFFLINE"
         else:
             c["status"] = "NEVER"
@@ -675,7 +678,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card">
       <div class="toolbar">
         <div class="search-box">
-          <input type="text" id="search-input" placeholder="Поиск по имени или IP..." oninput="applyFilters()">
+          <input type="text" id="search-input" name="client-search-filter" placeholder="Поиск по имени или IP..." oninput="applyFilters()" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other">
         </div>
         <div class="filter-box">
           <select id="status-filter" onchange="applyFilters()">
