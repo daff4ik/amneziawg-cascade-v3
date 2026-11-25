@@ -1012,6 +1012,9 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
         Заявки появляются здесь (и кнопкой в Telegram-боте) — одобряйте или отклоняйте.
         У одобренного пользователя есть личный кабинет, где он видит только свои конфиги.
       </p>
+      <div style="margin-bottom:0.75rem;">
+        <button class="btn btn-primary" onclick="openBroadcast()">✉️ Рассылка письма</button>
+      </div>
       <div id="users-list"></div>
     </div>
     <div class="card">
@@ -1148,6 +1151,22 @@ New-NetFirewallRule -DisplayName "Allow Ping from VPN" -Direction Inbound -Proto
   <div id="loader-text" style="font-weight: 500;">Подождите...</div>
 </div>
 
+<!-- Модальное окно: рассылка абонентам -->
+<div id="broadcast-modal" class="modal">
+  <div class="modal-content">
+    <button class="modal-close" onclick="closeModal('broadcast-modal')">&times;</button>
+    <h3>✉️ Рассылка письма абонентам</h3>
+    <div style="margin-bottom:0.75rem;">
+      <label style="font-size:0.9rem;"><input type="checkbox" id="bc-all" checked onchange="toggleBcAll()"> <b>Всем активным пользователям</b></label>
+      <div id="bc-list" style="margin-top:0.5rem;max-height:150px;overflow-y:auto;"></div>
+    </div>
+    <input type="text" id="bc-subject" placeholder="Тема (пусто = «уведомление»)" style="width:100%;padding:0.6rem 0.8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);margin-bottom:0.5rem;" autocomplete="off">
+    <textarea id="bc-text" rows="5" placeholder="Текст письма..." style="width:100%;padding:0.6rem 0.8rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:inherit;"></textarea>
+    <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.4rem;">В конец письма автоматически добавляется ссылка на личный кабинет.</div>
+    <button class="btn btn-primary" style="margin-top:0.75rem;width:100%;" onclick="sendBroadcast()">Отправить</button>
+  </div>
+</div>
+
 <script>
 const BASE_URL = "__BASE__";
 let _allClients = [];
@@ -1201,6 +1220,7 @@ async function loadUsers() {
     const r = await fetch(BASE_URL + '/api/users', {credentials:'same-origin'});
     if (!r.ok) throw new Error('Ошибка сервера');
     const list = await r.json();
+    _allUsers = list;
     const pending = list.filter(u => u.status === 'pending').length;
     document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
     document.getElementById('reg-link').textContent = location.origin + '/cli/register';
@@ -1317,6 +1337,47 @@ async function userResetPass(username, label) {
 }
 
 // ==================== Mail settings ====================
+let _allUsers = [];
+
+function openBroadcast() {
+  const approved = _allUsers.filter(u => u.status === 'approved');
+  if (!approved.length) { alert('Нет активных пользователей'); return; }
+  document.getElementById('bc-all').checked = true;
+  document.getElementById('bc-list').innerHTML = approved.map(u =>
+    `<div><label style="font-size:0.85rem;"><input type="checkbox" class="bc-user" value="${escapeHtml(u.username)}" disabled checked> ${escapeHtml(u.username)} <span style="color:var(--text-muted);">(${escapeHtml(u.email)})</span></label></div>`
+  ).join('');
+  document.getElementById('broadcast-modal').style.display = 'flex';
+}
+
+function toggleBcAll() {
+  const all = document.getElementById('bc-all').checked;
+  document.querySelectorAll('.bc-user').forEach(c => { c.disabled = all; c.checked = all || c.checked; });
+}
+
+async function sendBroadcast() {
+  const all = document.getElementById('bc-all').checked;
+  const usernames = all ? [] : [...document.querySelectorAll('.bc-user:checked')].map(c => c.value);
+  if (!all && !usernames.length) { alert('Выберите хотя бы одного получателя'); return; }
+  const text = document.getElementById('bc-text').value.trim();
+  if (!text) { alert('Введите текст письма'); return; }
+  closeModal('broadcast-modal');
+  showLoader('Отправка писем...');
+  try {
+    const r = await fetch(BASE_URL + '/api/users/broadcast', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({usernames, subject: document.getElementById('bc-subject').value.trim(), text})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    const fails = Object.entries(d.results || {}).filter(([k,v]) => v !== 'ok');
+    let msg = `✅ Отправлено: ${d.sent} из ${d.total}`;
+    if (fails.length) msg += '\n\nОшибки:\n' + fails.map(([k,v]) => `${k}: ${v}`).join('\n');
+    alert(msg);
+    document.getElementById('bc-text').value = '';
+    document.getElementById('bc-subject').value = '';
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
+}
+
 async function loadMail() {
   try {
     const r = await fetch(BASE_URL + '/api/mail/settings', {credentials:'same-origin'});
@@ -2023,6 +2084,19 @@ async def api_proto_action(request: Request, action: str, name: str):
         tail = ((err or "") + (out or "")).strip()[-400:]
         return JSONResponse({"error": tail or "Ошибка операции"}, status_code=500)
     _notify(f"🧩 <b>Протокол {name}</b>\nОперация: {action} — OK")
+    if action == "use-for-clients":
+        # Клиентам нужно переимпортировать конфиги — уведомляем абонентов по почте
+        try:
+            users = await run_in_threadpool(_list_users)
+            for u in users:
+                if u["status"] == "approved":
+                    await run_in_threadpool(
+                        send_mail, u["email"], f"{SERVER_LABEL}: обновите конфиги VPN",
+                        f"Здравствуйте, {u['username']}!\n\n"
+                        f"Изменились настройки DNS сервера. Зайдите в личный кабинет и заново "
+                        f"скачайте конфиги для своих устройств:\n{client_portal_url()}/ulogin\n")
+        except Exception:
+            pass
     if action in ("install", "remove"):
         _backup_async()
     link = ""
@@ -2710,6 +2784,32 @@ async def api_user_notify(request: Request, username: str):
     if not ok:
         return JSONResponse({"error": msg}, status_code=500)
     return {"ok": True}
+
+@app.post("/api/users/broadcast")
+async def api_users_broadcast(request: Request):
+    """Массовое/точечное письмо: выбранным пользователям или всем активным."""
+    current_user(request)
+    body = await request.json()
+    usernames = [re.sub(r"[^a-zA-Z0-9_-]", "", str(u)) for u in (body.get("usernames") or [])]
+    subject = str(body.get("subject", "")).strip()[:150] or f"{SERVER_LABEL}: уведомление"
+    text = str(body.get("text", "")).strip()[:4000]
+    if not text:
+        return JSONResponse({"error": "Пустой текст письма"}, status_code=400)
+    users = await run_in_threadpool(_list_users)
+    approved = {u["username"]: u for u in users if u["status"] == "approved"}
+    targets = [u for u in usernames if u in approved] if usernames else list(approved)
+    if not targets:
+        return JSONResponse({"error": "Нет получателей (нужны одобренные пользователи)"}, status_code=400)
+    results = {}
+    footer = f"\n---\nЛичный кабинет: {client_portal_url()}/ulogin\n"
+    for name in targets:
+        u = approved[name]
+        ok, msg = await run_in_threadpool(send_mail, u["email"], subject,
+                                          f"Здравствуйте, {u['username']}!\n\n{text}{footer}")
+        results[name] = "ok" if ok else msg
+    sent = sum(1 for v in results.values() if v == "ok")
+    _notify(f"✉️ <b>Рассылка абонентам</b>\nТема: {subject}\nОтправлено: {sent}/{len(targets)}")
+    return {"ok": True, "sent": sent, "total": len(targets), "results": results}
 
 @app.post("/api/users/reset-pass/{username}")
 async def api_user_reset_pass(request: Request, username: str):
