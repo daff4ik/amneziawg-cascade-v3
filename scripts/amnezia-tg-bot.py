@@ -52,6 +52,7 @@ if _stealth.get("domain") and _stealth.get("secret_path"):
     PANEL_URL = f"https://{_stealth['domain']}/{_stealth['secret_path']}/"
 
 PENDING = {}  # chat_id -> (action, timestamp)
+HINTED = {}   # chat_id -> ts (подсказка chat_id чужому чату — раз в час)
 
 # --- Локальный API панели (заявки на регистрацию) ---
 PANEL_TOKEN = load_conf(PANEL_CONF).get("api_token", "")
@@ -440,6 +441,15 @@ def main():
                 continue
             if chat_id not in ALLOWED:
                 log(f"IGNORED chat={chat_id} text={text[:30]!r} (добавьте в TELEGRAM_BOT_ALLOWED)")
+                # Неизвестному чату на /start или /menu один раз в час подсказываем его chat_id,
+                # чтобы админ мог добавить его в TELEGRAM_BOT_ALLOWED
+                if text.split("@")[0].lower() in ("/start", "/menu") \
+                        and time.time() - HINTED.get(chat_id, 0) > 3600:
+                    HINTED[chat_id] = time.time()
+                    send(chat_id,
+                         f"🔒 Это приватный бот управления VPN.\n"
+                         f"Ваш chat_id: <code>{esc(chat_id)}</code>\n"
+                         f"Передайте его администратору — он добавит вас в список доступа.")
                 continue
             if time.time() - msg.get("date", 0) > MAX_MSG_AGE:
                 continue

@@ -166,23 +166,6 @@ def send_mail(to_addr: str, subject: str, body: str) -> tuple:
     except Exception as e:
         return False, str(e)[:300]
 
-def public_base_url() -> str:
-    """Публичный URL панели для ссылок в письмах (stealth-домен или IP:8000)."""
-    if os.path.exists(STEALTH_CONF):
-        try:
-            cfg = {}
-            with open(STEALTH_CONF, encoding="utf-8") as f:
-                for line in f:
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        cfg[k.strip()] = v.strip().strip('"').strip("'")
-            if cfg.get("domain") and cfg.get("secret_path"):
-                return f"https://{cfg['domain']}/{cfg['secret_path']}"
-        except Exception:
-            pass
-    host = CAS.get("ENDPOINT_HOST", "") or "IP-СЕРВЕРА"
-    return f"https://{host}:8000"
-
 
 # ================ Общие константы каскада (пишет deploy.sh) ================
 def load_cascade_env():
@@ -1220,7 +1203,7 @@ async function loadUsers() {
     const list = await r.json();
     const pending = list.filter(u => u.status === 'pending').length;
     document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
-    document.getElementById('reg-link').textContent = location.origin + BASE_URL + '/register';
+    document.getElementById('reg-link').textContent = location.origin + '/cli/register';
     if (!list.length) { box.innerHTML = '<div style="color:var(--text-muted);">Пользователей пока нет — отправьте им ссылку для регистрации выше.</div>'; return; }
     box.innerHTML = list.map(u => {
       const badges = {pending: '<span class="status-badge status-offline">⏳ ожидает</span>',
@@ -1924,8 +1907,17 @@ async def api_notify_save(request: Request):
     if not re.fullmatch(r"-?\d{5,}", chat_id):
         return JSONResponse({"error": "Некорректный chat_id (ожидается число)"}, status_code=400)
     try:
+        # Сохраняем прочие ключи (TELEGRAM_BOT_ALLOWED и т.п.) — не затираем файл целиком
+        keep = []
+        if os.path.exists(NOTIFY_CONF):
+            with open(NOTIFY_CONF, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip() and not line.startswith(("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")):
+                        keep.append(line.rstrip("\n"))
         with open(NOTIFY_CONF, "w", encoding="utf-8") as f:
             f.write(f'TELEGRAM_BOT_TOKEN="{token}"\nTELEGRAM_CHAT_ID="{chat_id}"\n')
+            for line in keep:
+                f.write(line + "\n")
         os.chmod(NOTIFY_CONF, 0o600)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2311,6 +2303,28 @@ async def dl_vpn(request: Request, name: str):
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{3,32}$")
 EMAIL_RE    = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[a-zA-Z]{2,}$")
 DEVICE_LABEL_RE = re.compile(r"^[0-9a-zA-Zа-яА-ЯёЁ _-]{1,24}$")
+PUB_PREFIX = "/cli"  # публичный префикс портала — не раскрывает секретный путь админки
+
+def req_prefix(request: Request) -> str:
+    """Префикс, через который пришёл запрос: публичный /cli или секретный BASE_URL."""
+    return PUB_PREFIX if request.url.path == PUB_PREFIX or request.url.path.startswith(PUB_PREFIX + "/") else BASE_URL
+
+def client_portal_url() -> str:
+    """Публичная ссылка на кабинет для писем: stealth-домен/cli или https://IP:8000/cli."""
+    if os.path.exists(STEALTH_CONF):
+        try:
+            cfg = {}
+            with open(STEALTH_CONF, encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip().strip('"').strip("'")
+            if cfg.get("domain"):
+                return f"https://{cfg['domain']}{PUB_PREFIX}"
+        except Exception:
+            pass
+    host = CAS.get("ENDPOINT_HOST", "") or "IP-СЕРВЕРА"
+    return f"https://{host}:8000{PUB_PREFIX}"
 
 def render_user_page(title, body, error="", ok=""):
     err = f'<div class="error-msg">{error}</div>' if error else ""
@@ -2336,16 +2350,19 @@ ULOGIN_BODY = """<form method="post" action="__BASE__/ulogin">
 <div class="links">Нет аккаунта? <a href="__BASE__/register">Регистрация</a></div>"""
 
 @app.get("/register", response_class=HTMLResponse)
+@app.get("/cli/register", response_class=HTMLResponse)
 async def register_page(request: Request, error: str = "", ok: str = ""):
-    return render_user_page("Регистрация", REGISTER_BODY.replace("__BASE__", BASE_URL), error, ok)
+    return render_user_page("Регистрация", REGISTER_BODY.replace("__BASE__", req_prefix(request)), error, ok)
 
 @app.post("/register")
+@app.post("/cli/register")
 async def register_submit(request: Request, username: str = Form(...), email: str = Form(...),
                           password: str = Form(...), password2: str = Form(...)):
     username = username.strip()
     email = email.strip().lower()
+    pfx = req_prefix(request)
     def fail(msg):
-        return RedirectResponse(f"{BASE_URL}/register?error={urllib.parse.quote_plus(msg)}", status_code=303)
+        return RedirectResponse(f"{pfx}/register?error={urllib.parse.quote_plus(msg)}", status_code=303)
     if not USERNAME_RE.fullmatch(username):
         return fail("Логин: латиница/цифры/_/-, 3-32 символа")
     if not EMAIL_RE.fullmatch(email):
@@ -2375,21 +2392,25 @@ async def register_submit(request: Request, username: str = Form(...), email: st
           {"text": "❌ Отклонить", "callback_data": f"ureg:no:{username}"}]])
     _notify(f"🆕 <b>Заявка на регистрацию</b>\nЛогин: <code>{username}</code>\nОдобрите во вкладке «Пользователи» или кнопкой выше.")
     return RedirectResponse(
-        f"{BASE_URL}/register?ok={urllib.parse.quote_plus('Заявка отправлена! После одобрения администратором вы сможете войти в личный кабинет.')}",
+        f"{pfx}/register?ok={urllib.parse.quote_plus('Заявка отправлена! После одобрения администратором вы сможете войти в личный кабинет.')}",
         status_code=303)
 
 @app.get("/ulogin", response_class=HTMLResponse)
+@app.get("/cli/ulogin", response_class=HTMLResponse)
 async def ulogin_page(request: Request, error: str = ""):
+    pfx = req_prefix(request)
     if check_user_token(request.cookies.get(USER_COOKIE, "")):
-        return RedirectResponse(f"{BASE_URL}/cabinet", status_code=303)
-    return render_user_page("Вход в личный кабинет", ULOGIN_BODY.replace("__BASE__", BASE_URL), error)
+        return RedirectResponse(f"{pfx}/cabinet", status_code=303)
+    return render_user_page("Вход в личный кабинет", ULOGIN_BODY.replace("__BASE__", pfx), error)
 
 @app.post("/ulogin")
+@app.post("/cli/ulogin")
 async def ulogin_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+    pfx = req_prefix(request)
     ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
     if _login_blocked(ip):
         return RedirectResponse(
-            f"{BASE_URL}/ulogin?error=Слишком+много+попыток.+Подождите+10+минут", status_code=303)
+            f"{pfx}/ulogin?error=Слишком+много+попыток.+Подождите+10+минут", status_code=303)
     u = get_user(username.strip())
     ok = False
     if u:
@@ -2401,36 +2422,38 @@ async def ulogin_submit(request: Request, username: str = Form(...), password: s
     if not ok:
         _register_login_fail(ip, username)
         await asyncio.sleep(1)
-        return RedirectResponse(f"{BASE_URL}/ulogin?error=Неверный+логин+или+пароль", status_code=303)
+        return RedirectResponse(f"{pfx}/ulogin?error=Неверный+логин+или+пароль", status_code=303)
     if u["status"] == "pending":
         return RedirectResponse(
-            f"{BASE_URL}/ulogin?error={urllib.parse.quote_plus('Заявка ещё на рассмотрении у администратора')}",
+            f"{pfx}/ulogin?error={urllib.parse.quote_plus('Заявка ещё на рассмотрении у администратора')}",
             status_code=303)
     if u["status"] != "approved":
         return RedirectResponse(
-            f"{BASE_URL}/ulogin?error={urllib.parse.quote_plus('Заявка отклонена. Свяжитесь с администратором')}",
+            f"{pfx}/ulogin?error={urllib.parse.quote_plus('Заявка отклонена. Свяжитесь с администратором')}",
             status_code=303)
     _clear_login_fails(ip)
-    r = RedirectResponse(f"{BASE_URL}/cabinet", status_code=303)
+    r = RedirectResponse(f"{pfx}/cabinet", status_code=303)
     r.set_cookie(USER_COOKIE, make_user_token(u["username"], int(time.time())), max_age=SESSION_DAYS*86400,
                  httponly=True, secure=True, samesite="lax", path="/")
     return r
 
 @app.get("/ulogout")
-async def ulogout():
-    r = RedirectResponse(f"{BASE_URL}/ulogin", status_code=303)
+@app.get("/cli/ulogout")
+async def ulogout(request: Request):
+    r = RedirectResponse(f"{req_prefix(request)}/ulogin", status_code=303)
     r.delete_cookie(USER_COOKIE, path="/")
     return r
 
 @app.exception_handler(RedirectToUserLogin)
 async def _rtul(request: Request, exc: RedirectToUserLogin):
-    return RedirectResponse(f"{BASE_URL}/ulogin", status_code=303)
+    return RedirectResponse(f"{req_prefix(request)}/ulogin", status_code=303)
 
 @app.get("/cabinet", response_class=HTMLResponse)
+@app.get("/cli/cabinet", response_class=HTMLResponse)
 async def cabinet_page(request: Request):
     username = current_client(request)
     return (CABINET_TEMPLATE.replace("__USERNAME__", username)
-            .replace("__LABEL__", SERVER_LABEL).replace("__BASE__", BASE_URL))
+            .replace("__LABEL__", SERVER_LABEL).replace("__BASE__", req_prefix(request)))
 
 # --- общий хелпер создания/удаления конфига-устройства ---
 def device_client_name(owner: str, label: str) -> str:
@@ -2514,6 +2537,7 @@ def _devices_status_map():
     return result
 
 @app.get("/api/cabinet/devices")
+@app.get("/cli/api/cabinet/devices")
 async def api_cabinet_devices(request: Request):
     username = current_client(request)
     conn = users_db()
@@ -2528,6 +2552,7 @@ async def api_cabinet_devices(request: Request):
         for r in rows])
 
 @app.post("/api/cabinet/devices/add")
+@app.post("/cli/api/cabinet/devices/add")
 async def api_cabinet_add(request: Request):
     username = current_client(request)
     body = await request.json()
@@ -2538,6 +2563,7 @@ async def api_cabinet_add(request: Request):
     return {"ok": True, "client_name": res}
 
 @app.post("/api/cabinet/devices/del")
+@app.post("/cli/api/cabinet/devices/del")
 async def api_cabinet_del(request: Request):
     username = current_client(request)
     body = await request.json()
@@ -2558,11 +2584,13 @@ def _check_device_owner(request: Request, client_name: str) -> str:
     return n
 
 @app.get("/cabinet/dl/conf/{client_name}")
+@app.get("/cli/cabinet/dl/conf/{client_name}")
 async def cabinet_dl_conf(request: Request, client_name: str):
     n = _check_device_owner(request, client_name)
     return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.conf"), f"{n}.conf")
 
 @app.get("/cabinet/dl/vpn/{client_name}")
+@app.get("/cli/cabinet/dl/vpn/{client_name}")
 async def cabinet_dl_vpn(request: Request, client_name: str):
     n = _check_device_owner(request, client_name)
     return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn.txt")
@@ -2595,7 +2623,7 @@ def _approve_user(username: str) -> tuple:
     conn.execute("UPDATE users SET status='approved' WHERE username=?", (u["username"],))
     conn.commit()
     conn.close()
-    link = f"{public_base_url()}{BASE_URL}/ulogin"
+    link = f"{client_portal_url()}/ulogin"
     send_mail(u["email"], f"{SERVER_LABEL}: доступ одобрен",
               f"Здравствуйте, {u['username']}!\n\n"
               f"Ваша заявка одобрена. Личный кабинет: {link}\n"
@@ -2678,7 +2706,7 @@ async def api_user_notify(request: Request, username: str):
         send_mail, u["email"], f"{SERVER_LABEL}: обновите конфиги VPN",
         f"Здравствуйте, {u['username']}!\n\n"
         f"Настройки сервера изменились. Зайдите в личный кабинет и заново "
-        f"скачайте конфиги для своих устройств:\n{public_base_url()}{BASE_URL}/ulogin\n")
+        f"скачайте конфиги для своих устройств:\n{client_portal_url()}/ulogin\n")
     if not ok:
         return JSONResponse({"error": msg}, status_code=500)
     return {"ok": True}

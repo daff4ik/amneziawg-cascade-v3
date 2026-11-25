@@ -145,6 +145,22 @@ server {
         return 301 /$SECRET_PATH/;
     }
 
+    # Публичный клиентский портал (регистрация/кабинет) — без секретного пути
+    location = /register {
+        return 301 /cli/register;
+    }
+
+    location /cli/ {
+        proxy_pass http://127.0.0.1:8000/cli/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
     # Проксирование панели Amnezia
     location /$SECRET_PATH/ {
         proxy_pass http://127.0.0.1:8000/;
@@ -176,6 +192,22 @@ server {
     # Строгий редирект для секретного пути (добавляет слэш на конце, если его нет)
     location = /$SECRET_PATH {
         return 301 /$SECRET_PATH/;
+    }
+
+    # Публичный клиентский портал (регистрация/кабинет) — без секретного пути
+    location = /register {
+        return 301 /cli/register;
+    }
+
+    location /cli/ {
+        proxy_pass http://127.0.0.1:8000/cli/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 
     # Проксирование панели Amnezia
