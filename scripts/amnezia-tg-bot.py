@@ -10,16 +10,19 @@
 import json
 import os
 import re
+import ssl
 import subprocess
 import time
 import urllib.parse
 import urllib.request
 
 CONF = "/etc/amnezia-notify.conf"
+PANEL_CONF = "/etc/amnezia-panel.conf"
 STEALTH_CONF = "/etc/amnezia-stealth.conf"
 CLIENTS_DIR = "/root/clients"
 LOG = "/var/log/amnezia-tg-bot.log"
 API = "https://api.telegram.org/bot{token}/{method}"
+PANEL_API = "https://127.0.0.1:8000"
 MAX_MSG_AGE = 120
 PENDING_TTL = 120
 
@@ -50,6 +53,31 @@ if _stealth.get("domain") and _stealth.get("secret_path"):
 
 PENDING = {}  # chat_id -> (action, timestamp)
 
+# --- Локальный API панели (заявки на регистрацию) ---
+PANEL_TOKEN = load_conf(PANEL_CONF).get("api_token", "")
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+def panel_api(path, method="GET", body=None):
+    """Вызов локального API панели с токеном. Возвращает (ok, dict)."""
+    if not PANEL_TOKEN:
+        return False, {"error": "нет api_token в /etc/amnezia-panel.conf"}
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(PANEL_API + path, data=data, method=method,
+                                 headers={"X-Panel-Token": PANEL_TOKEN,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as r:
+            return True, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return False, json.loads(e.read().decode())
+        except Exception:
+            return False, {"error": str(e)}
+    except Exception as e:
+        return False, {"error": str(e)}
+
 def log(msg):
     try:
         with open(LOG, "a", encoding="utf-8") as f:
@@ -77,7 +105,7 @@ def main_menu_kb(is_channel=False):
         [btn("📊 Статус", "status"), btn("👥 Клиенты", "clients")],
         [btn("➕ Добавить клиента", "add"), btn("➖ Удалить клиента", "del_menu")],
         [btn("🔄 Рестарт туннелей", "restart"), btn("💾 Бэкап", "backup")],
-        [btn("⚙️ Ещё", "more")],
+        [btn("👤 Заявки на регистрацию", "users"), btn("⚙️ Ещё", "more")],
     ]
     # web_app-кнопки Telegram запрещает в каналах — там сообщение целиком падает с 400
     if PANEL_URL and not is_channel:
@@ -153,6 +181,7 @@ HELP = """<b>Команды бота:</b> (или просто кнопки ме
 /restart — рестарт туннелей awg0+awg1
 /restart_panel — рестарт веб-панели
 /backup — создать бэкап
+/users — заявки на регистрацию (одобрить/отклонить)
 /reboot — перезагрузка сервера (подтверждение: /reboot ДА)"""
 
 # ==================== Действия ====================
@@ -219,6 +248,21 @@ def do_backup(chat_id):
     rc, out = run(["/usr/local/bin/amnezia-backup.sh"], timeout=300)
     send(chat_id, ("✅ " if rc == 0 else "❌ ") + "<pre>" + esc(out[-1500:]) + "</pre>", back_kb())
 
+def show_users(chat_id):
+    ok, data = panel_api("/api/bot/pending")
+    if not ok:
+        send(chat_id, f"❌ Не удалось получить заявки: {esc(data.get('error', '?'))}", back_kb())
+        return
+    if not data:
+        send(chat_id, "Заявок на регистрацию нет.", back_kb())
+        return
+    send(chat_id, f"<b>👤 Заявки на регистрацию ({len(data)}):</b>")
+    for u in data[:20]:
+        send(chat_id, f"Логин: <code>{esc(u['username'])}</code>\nEmail: <code>{esc(u['email'])}</code>",
+             kb([[btn("✅ Одобрить", f"ureg:ok:{u['username']}"),
+                  btn("❌ Отклонить", f"ureg:no:{u['username']}")]]))
+    send(chat_id, "—", back_kb())
+
 # ==================== Обработчики ====================
 
 def handle_text(chat_id, text, is_channel=False):
@@ -260,6 +304,8 @@ def handle_text(chat_id, text, is_channel=False):
         send(chat_id, "✅ Веб-панель перезапущена", back_kb())
     elif cmd == "/backup":
         do_backup(chat_id)
+    elif cmd == "/users":
+        show_users(chat_id)
     elif cmd == "/reboot":
         if arg == "ДА":
             send(chat_id, "⚠️ Перезагружаю сервер. Вернусь через пару минут.")
@@ -308,6 +354,17 @@ def handle_callback(chat_id, qid, data, is_channel=False):
         send(chat_id, "✅ Веб-панель перезапущена", back_kb())
     elif data == "backup":
         do_backup(chat_id)
+    elif data == "users":
+        show_users(chat_id)
+    elif data.startswith("ureg:ok:") or data.startswith("ureg:no:"):
+        _, verdict, username = data.split(":", 2)
+        ok, res = panel_api("/api/bot/user-decision", "POST",
+                            {"username": username,
+                             "decision": "approve" if verdict == "ok" else "reject"})
+        if ok:
+            send(chat_id, res.get("text", "Готово"), back_kb())
+        else:
+            send(chat_id, f"⚠️ {esc(res.get('error', 'Ошибка'))}", back_kb())
     elif data == "reboot":
         send(chat_id, "⚠️ <b>Перезагрузить SERVER-A?</b>\nVPN отключится на пару минут.", kb([
             [btn("✅ Да, перезагрузить", "reboot_yes"), btn("❌ Отмена", "menu")],
@@ -326,6 +383,7 @@ def setup_bot():
             {"command": "status", "description": "📊 Статус туннеля"},
             {"command": "clients", "description": "👥 Список клиентов"},
             {"command": "add", "description": "➕ Добавить клиента"},
+            {"command": "users", "description": "👤 Заявки на регистрацию"},
             {"command": "help", "description": "❓ Справка"},
         ]
         api("setMyCommands", commands=json.dumps(commands))

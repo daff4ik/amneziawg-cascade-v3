@@ -916,6 +916,12 @@ EOF
         chmod 600 /etc/amnezia-panel.conf
     fi
 
+    # Токен локального API (бот -> панель: одобрение заявок и т.п.)
+    if ! grep -q "^api_token=" /etc/amnezia-panel.conf; then
+        echo "api_token=$(openssl rand -hex 24)" >> /etc/amnezia-panel.conf
+        chmod 600 /etc/amnezia-panel.conf
+    fi
+
     # Fail2Ban-защита формы логина панели (если fail2ban установлен)
     if command -v fail2ban-client >/dev/null 2>&1; then
         cat > /etc/fail2ban/filter.d/amnezia-panel.conf <<'EOF'

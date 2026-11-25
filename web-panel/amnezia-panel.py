@@ -7,12 +7,16 @@ import re
 import hmac
 import hashlib
 import shlex
+import smtplib
+import secrets
 import sqlite3
 import subprocess
 import time
 import urllib.request
+import urllib.parse
 import json
 import datetime
+from email.message import EmailMessage
 from fastapi import FastAPI, HTTPException, Form, Request
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -34,10 +38,151 @@ COMMIT_STATE_FILE = "/var/lib/amnezia-panel/installed_commit"
 REPO_API_URL      = "https://api.github.com/repos/daff4ik/amneziawg-cascade-v3/commits"
 
 SESSION_COOKIE = "amnezia_session"
+USER_COOKIE    = "amnezia_user_session"
 SESSION_DAYS   = 7
 
 CASCADE_ENV = "/etc/amnezia-cascade.env"
 AUTH_LOG    = "/var/log/amnezia-panel-auth.log"
+
+# ================ Пользователи-абоненты (личные кабинеты) ================
+USERS_DB   = "/var/lib/amnezia-panel/users.db"
+MAIL_CONF  = "/etc/amnezia-mail.conf"
+STEALTH_CONF = "/etc/amnezia-stealth.conf"
+MAX_DEVICES_PER_USER = 10
+
+def users_db():
+    os.makedirs(os.path.dirname(USERS_DB), exist_ok=True)
+    conn = sqlite3.connect(USERS_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS users(
+        username TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        pass_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_ts INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS devices(
+        client_name TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        label TEXT NOT NULL,
+        created_ts INTEGER NOT NULL)""")
+    return conn
+
+def hash_password(p: str) -> str:
+    salt = secrets.token_hex(8)
+    return f"sha256:{salt}:{hashlib.sha256((salt + p).encode()).hexdigest()}"
+
+def get_api_token() -> str:
+    """Токен для локальных вызовов API (бот -> панель). Автогенерация при первом обращении."""
+    tok = get_config_val("api_token", "")
+    if tok:
+        return tok
+    tok = secrets.token_hex(24)
+    try:
+        with open(CONFIG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\napi_token={tok}\n")
+    except Exception:
+        pass
+    return tok
+
+def get_user(username: str):
+    conn = users_db()
+    row = conn.execute("SELECT username, email, pass_hash, status, created_ts FROM users WHERE username=?",
+                       (username,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"username": row[0], "email": row[1], "pass_hash": row[2], "status": row[3], "created_ts": row[4]}
+
+def make_user_token(username: str, ts: int) -> str:
+    sig = hmac.new(get_api_token().encode(), f"user-session:{username}:{ts}".encode(), hashlib.sha256).hexdigest()
+    return f"{username}.{ts}.{sig}"
+
+def check_user_token(token: str) -> str:
+    """Возвращает username одобренного пользователя или ''."""
+    try:
+        username, ts_str, sig = token.rsplit(".", 2)
+        ts = int(ts_str)
+    except (ValueError, AttributeError):
+        return ""
+    if not 0 <= time.time() - ts <= SESSION_DAYS * 86400:
+        return ""
+    expected = hmac.new(get_api_token().encode(), f"user-session:{username}:{ts}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return ""
+    u = get_user(username)
+    return username if u and u["status"] == "approved" else ""
+
+class RedirectToUserLogin(Exception):
+    pass
+
+def current_client(request: Request) -> str:
+    username = check_user_token(request.cookies.get(USER_COOKIE, ""))
+    if not username:
+        if request.url.path.startswith("/api/"):
+            raise HTTPException(401, "Unauthorized")
+        raise RedirectToUserLogin()
+    return username
+
+# ================ Почтовые уведомления абонентам (SMTP) ================
+def load_mail_conf():
+    cfg = {}
+    if os.path.exists(MAIL_CONF):
+        try:
+            with open(MAIL_CONF, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip().strip('"')
+        except Exception:
+            pass
+    return cfg
+
+def send_mail(to_addr: str, subject: str, body: str) -> tuple:
+    cfg = load_mail_conf()
+    host, port = cfg.get("SMTP_HOST", ""), int(cfg.get("SMTP_PORT", "465") or 465)
+    user, pwd = cfg.get("SMTP_USER", ""), cfg.get("SMTP_PASS", "")
+    from_addr = cfg.get("SMTP_FROM", "") or user
+    if not (host and from_addr):
+        return False, "SMTP не настроен (вкладка «Пользователи» → Почтовые уведомления)"
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as s:
+                if user:
+                    s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as s:
+                s.ehlo()
+                s.starttls()
+                if user:
+                    s.login(user, pwd)
+                s.send_message(msg)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)[:300]
+
+def public_base_url() -> str:
+    """Публичный URL панели для ссылок в письмах (stealth-домен или IP:8000)."""
+    if os.path.exists(STEALTH_CONF):
+        try:
+            cfg = {}
+            with open(STEALTH_CONF, encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        cfg[k.strip()] = v.strip().strip('"').strip("'")
+            if cfg.get("domain") and cfg.get("secret_path"):
+                return f"https://{cfg['domain']}/{cfg['secret_path']}"
+        except Exception:
+            pass
+    host = CAS.get("ENDPOINT_HOST", "") or "IP-СЕРВЕРА"
+    return f"https://{host}:8000"
+
 
 # ================ Общие константы каскада (пишет deploy.sh) ================
 def load_cascade_env():
@@ -491,6 +636,168 @@ LOGIN_TEMPLATE = r"""<!DOCTYPE html>
 </body>
 </html>"""
 
+# --- Шаблоны клиентского портала (регистрация, вход, кабинет) ---
+USER_AUTH_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>__TITLE__ — __LABEL__</title>
+<style>
+  :root { --bg: #f2f2f7; --surface: #ffffff; --text: #1d1d1f; --text-muted: #86868b; --border: #d2d2d7; --primary: #0071e3; --primary-hover: #0077ed; --danger-bg: #ffe5e5; --danger-text: #d93025; --ok-bg: #e5f9ed; --ok-text: #1d7a3d; --header-bg: #1d1d1f; --header-text: #ffffff; }
+  html[data-theme="dark"] { --bg: #1c1c1e; --surface: #2c2c2e; --text: #f5f5f7; --text-muted: #98989d; --border: #48484a; --primary: #0a84ff; --primary-hover: #409cff; --danger-bg: #3a1a1a; --danger-text: #ff6961; --ok-bg: #16331f; --ok-text: #4ade80; --header-bg: #000000; }
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--text); display: flex; flex-direction: column; min-height: 100vh; }
+  header { background: var(--header-bg); color: var(--header-text); padding: 1rem; text-align: center; }
+  header h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
+  .auth-container { flex: 1; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .auth-card { background: var(--surface); padding: 2rem; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.06); width: 100%; max-width: 400px; }
+  .auth-card h2 { margin-top: 0; margin-bottom: 1.5rem; text-align: center; font-size: 1.25rem; }
+  .input-group { margin-bottom: 1.25rem; }
+  input { width: 100%; padding: 0.875rem 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); font-size: 1rem; }
+  input:focus-visible { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
+  button { width: 100%; padding: 0.875rem; background: var(--primary); color: #fff; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  button:hover { background: var(--primary-hover); }
+  .error-msg { background: var(--danger-bg); color: var(--danger-text); padding: 0.75rem; border-radius: 8px; font-size: 0.875rem; text-align: center; margin-bottom: 1.25rem; }
+  .ok-msg { background: var(--ok-bg); color: var(--ok-text); padding: 0.75rem; border-radius: 8px; font-size: 0.875rem; text-align: center; margin-bottom: 1.25rem; }
+  .links { text-align: center; margin-top: 1rem; font-size: 0.9rem; }
+  .links a { color: var(--primary); text-decoration: none; }
+</style>
+</head>
+<body>
+<header><h1>🛡️ __LABEL__</h1></header>
+<div class="auth-container">
+  <div class="auth-card">
+    <h2>__TITLE__</h2>
+    __ERR__
+    __OK__
+    __BODY__
+  </div>
+</div>
+</body>
+</html>"""
+
+CABINET_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Мои конфиги — __LABEL__</title>
+<style>
+  :root { --bg: #f2f2f7; --surface: #ffffff; --text: #1d1d1f; --text-muted: #86868b; --border: #e5e5ea; --primary: #0071e3; --primary-hover: #0077ed; --danger: #d93025; --online: #34c759; --offline: #ff9500; --never: #8e8e93; --header-bg: #1d1d1f; --header-text: #ffffff; }
+  html[data-theme="dark"] { --bg: #1c1c1e; --surface: #2c2c2e; --text: #f5f5f7; --text-muted: #98989d; --border: #48484a; --primary: #0a84ff; --primary-hover: #409cff; --header-bg: #000000; }
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; }
+  header { background: var(--header-bg); color: var(--header-text); padding: 1rem; }
+  .header-content { max-width: 800px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+  header .sub { font-size: 0.8rem; opacity: 0.7; margin-top: 0.2rem; }
+  .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.4); color: var(--header-text); padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; text-decoration: none; cursor: pointer; }
+  .container { max-width: 800px; margin: 0 auto; padding: 1rem; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1rem; }
+  .device { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 0.6rem; }
+  .device .name { font-weight: 600; flex: 1; min-width: 120px; }
+  .badge { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 20px; font-weight: 600; }
+  .b-on { background: rgba(52,199,89,0.15); color: var(--online); }
+  .b-off { background: rgba(255,149,0,0.15); color: var(--offline); }
+  .b-never { background: rgba(142,142,147,0.15); color: var(--never); }
+  .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 0.45rem 0.8rem; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; }
+  .btn:hover { background: var(--primary-hover); }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  input { padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); font-size: 0.95rem; }
+  .muted { color: var(--text-muted); font-size: 0.85rem; }
+  .alert { padding: 0.8rem 1rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.9rem; display: none; }
+  .alert.ok { display: block; background: rgba(52,199,89,0.12); color: var(--online); }
+  .alert.err { display: block; background: rgba(217,48,37,0.12); color: var(--danger); }
+  .vpn-link { word-break: break-all; font-size: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; margin-top: 0.5rem; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-content">
+    <div><h1>🛡️ __LABEL__</h1><div class="sub">Личный кабинет: __USERNAME__</div></div>
+    <a href="__BASE__/ulogout" class="btn-ghost">🚪 Выход</a>
+  </div>
+</header>
+<div class="container">
+  <div id="cab-alert" class="alert"></div>
+  <div class="card">
+    <h3 style="margin-top:0;">➕ Добавить устройство</h3>
+    <p class="muted">Для каждого устройства (телефон, ноутбук, телевизор) создаётся отдельный конфиг.</p>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+      <input type="text" id="new-device" placeholder="Название, например: телефон" maxlength="24" style="flex:1;min-width:180px;" autocomplete="off">
+      <button class="btn" onclick="addDevice()">Создать конфиг</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0;">📱 Мои устройства</h3>
+    <div id="devices-list"><div class="muted">Загрузка...</div></div>
+  </div>
+  <div class="card muted">
+    <b>Как подключиться:</b> установите приложение AmneziaVPN → «Добавить профиль» →
+    вставьте vpn:// ссылку или импортируйте скачанный .conf файл.
+  </div>
+</div>
+<script>
+const BASE_URL = "__BASE__";
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function alertBox(kind, txt){const a=document.getElementById('cab-alert');a.className='alert '+kind;a.textContent=txt;if(txt)setTimeout(()=>{a.className='alert';},6000);}
+async function loadDevices(){
+  try {
+    const r = await fetch(BASE_URL + '/api/cabinet/devices', {credentials:'same-origin'});
+    if (r.status === 401) { location.href = BASE_URL + '/ulogin'; return; }
+    const list = await r.json();
+    const box = document.getElementById('devices-list');
+    if (!list.length) { box.innerHTML = '<div class="muted">Устройств пока нет — добавьте первое выше.</div>'; return; }
+    box.innerHTML = list.map(d => {
+      const badge = d.status === 'ONLINE' ? '<span class="badge b-on">онлайн</span>'
+                  : d.status === 'OFFLINE' ? '<span class="badge b-off">офлайн</span>'
+                  : '<span class="badge b-never">не подключался</span>';
+      return `<div class="device">
+        <div class="name">${esc(d.label)} ${badge}<div class="muted">${esc(d.client_name)} · ${esc(d.ip||'')}</div></div>
+        <a class="btn" href="${BASE_URL}/cabinet/dl/conf/${encodeURIComponent(d.client_name)}">⬇ .conf</a>
+        <button class="btn" onclick="showVpn('${esc(d.client_name)}')">🔗 vpn://</button>
+        <button class="btn btn-danger" onclick="delDevice('${esc(d.client_name)}','${esc(d.label)}')">🗑</button>
+        <div class="vpn-link" id="vpn-${esc(d.client_name)}"></div>
+      </div>`;
+    }).join('');
+  } catch(e) { document.getElementById('devices-list').innerHTML = '<div class="muted">Ошибка загрузки</div>'; }
+}
+async function addDevice(){
+  const label = document.getElementById('new-device').value.trim();
+  if (!label) { alertBox('err','Введите название устройства'); return; }
+  const r = await fetch(BASE_URL + '/api/cabinet/devices/add', {method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})});
+  const d = await r.json();
+  if (!r.ok) { alertBox('err', d.error || 'Ошибка'); return; }
+  document.getElementById('new-device').value = '';
+  alertBox('ok', 'Конфиг «' + label + '» создан');
+  loadDevices();
+}
+async function delDevice(clientName, label){
+  if (!confirm('Удалить конфиг «' + label + '»? Устройство потеряет доступ.')) return;
+  const r = await fetch(BASE_URL + '/api/cabinet/devices/del', {method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({client_name: clientName})});
+  const d = await r.json();
+  if (!r.ok) { alertBox('err', d.error || 'Ошибка'); return; }
+  alertBox('ok', 'Конфиг удалён');
+  loadDevices();
+}
+async function showVpn(clientName){
+  const el = document.getElementById('vpn-' + clientName);
+  if (el.style.display === 'block') { el.style.display = 'none'; return; }
+  const r = await fetch(BASE_URL + '/cabinet/dl/vpn/' + encodeURIComponent(clientName), {credentials:'same-origin'});
+  if (!r.ok) { alertBox('err','Ссылка недоступна'); return; }
+  const txt = await r.text();
+  el.textContent = txt;
+  el.style.display = 'block';
+  try { await navigator.clipboard.writeText(txt); alertBox('ok','vpn:// ссылка скопирована'); } catch(e) {}
+}
+loadDevices();
+</script>
+</body>
+</html>"""
+
 PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ru" data-theme="light">
 <head>
@@ -644,6 +951,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="tabs">
   <button class="tab active" onclick="switchTab('clients')">👥 Клиенты (<span id="clients-count">__COUNT__</span>)</button>
+  <button class="tab" onclick="switchTab('users')">👤 Пользователи <span id="users-pending"></span></button>
   <button class="tab" onclick="switchTab('protocols')">🧩 Протоколы</button>
   __SERVERS_TAB__
   <button class="tab" onclick="switchTab('notify')">🔔 Уведомления</button>
@@ -708,6 +1016,39 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <div style="text-align: right; font-size: 0.75rem; color: var(--text-muted); margin-top: 1rem;">
         Обновлено: <span id="last-update">--:--:--</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="users-view" class="view-section">
+    <div class="card">
+      <h3 style="margin-top:0;">👤 Пользователи и их устройства</h3>
+      <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
+        Ссылка для регистрации абонентов: <code id="reg-link"></code>
+        <button class="btn btn-small" onclick="navigator.clipboard.writeText(document.getElementById('reg-link').textContent).then(()=>alert('Ссылка скопирована'))">📋</button><br>
+        Заявки появляются здесь (и кнопкой в Telegram-боте) — одобряйте или отклоняйте.
+        У одобренного пользователя есть личный кабинет, где он видит только свои конфиги.
+      </p>
+      <div id="users-list"></div>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0;">📧 Почтовые уведомления (SMTP)</h4>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+        Письма абонентам: доступ одобрен, нужно обновить конфиг и т.п. Например, для Gmail — хост smtp.gmail.com, порт 465, пароль приложения.
+      </p>
+      <div id="mail-status"></div>
+      <div class="form-group" style="margin-bottom:0.5rem;">
+        <input type="text" id="smtp-host" placeholder="SMTP хост (smtp.gmail.com)" autocomplete="off">
+        <input type="number" id="smtp-port" placeholder="Порт" value="465" style="max-width:100px;">
+      </div>
+      <div class="form-group" style="margin-bottom:0.5rem;">
+        <input type="text" id="smtp-user" placeholder="SMTP логин (обычно email)" autocomplete="off">
+        <input type="password" id="smtp-pass" placeholder="SMTP пароль (пусто = не менять)" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <input type="text" id="smtp-from" placeholder="От кого (пусто = логин)" autocomplete="off">
+        <button class="btn btn-primary" onclick="saveMail()">Сохранить</button>
+        <button class="btn" onclick="testMail()">Тест на email…</button>
       </div>
     </div>
   </div>
@@ -866,6 +1207,178 @@ function switchTab(tabId) {
   if (tabId === 'servers') { loadServers(); loadBackups(); }
   if (tabId === 'notify') loadNotify();
   if (tabId === 'protocols') loadProtocols();
+  if (tabId === 'users') { loadUsers(); loadMail(); }
+}
+
+// ==================== Users (абоненты) ====================
+async function loadUsers() {
+  const box = document.getElementById('users-list');
+  box.innerHTML = '<div style="color:var(--text-muted);">Загрузка...</div>';
+  try {
+    const r = await fetch(BASE_URL + '/api/users', {credentials:'same-origin'});
+    if (!r.ok) throw new Error('Ошибка сервера');
+    const list = await r.json();
+    const pending = list.filter(u => u.status === 'pending').length;
+    document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
+    document.getElementById('reg-link').textContent = location.origin + BASE_URL + '/register';
+    if (!list.length) { box.innerHTML = '<div style="color:var(--text-muted);">Пользователей пока нет — отправьте им ссылку для регистрации выше.</div>'; return; }
+    box.innerHTML = list.map(u => {
+      const badges = {pending: '<span class="status-badge status-offline">⏳ ожидает</span>',
+                      approved: '<span class="status-badge status-online">✅ активен</span>',
+                      rejected: '<span class="status-badge status-never">🚫 отклонён</span>'};
+      let actions = '';
+      if (u.status === 'pending') {
+        actions = `<button class="btn btn-small btn-primary" onclick="userAction('approve','${u.username}','${escapeHtml(u.username)}')">✅ Одобрить</button>
+          <button class="btn btn-small btn-danger" onclick="userAction('reject','${u.username}','${escapeHtml(u.username)}')">❌ Отклонить</button>`;
+      } else {
+        if (u.status === 'approved') {
+          actions += `<button class="btn btn-small" onclick="userNotify('${u.username}','${escapeHtml(u.username)}')">✉️ Уведомить (обновить конфиг)</button>
+            <button class="btn btn-small" onclick="userResetPass('${u.username}','${escapeHtml(u.username)}')">🔑 Сброс пароля</button>`;
+        }
+        actions += ` <button class="btn btn-small btn-danger" onclick="userDelete('${u.username}','${escapeHtml(u.username)}',${u.devices.length})">🗑 Удалить</button>`;
+      }
+      const devRows = u.devices.map(d => `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.4rem 0.4rem 1.5rem;border-top:1px dashed var(--border);flex-wrap:wrap;">
+          <span style="flex:1;min-width:120px;">└ ${escapeHtml(d.label)} <code style="font-size:0.75rem;color:var(--text-muted);">${escapeHtml(d.client_name)}</code></span>
+          <a class="btn btn-small" href="${BASE_URL}/download/conf/${encodeURIComponent(d.client_name)}">⬇ .conf</a>
+          <button class="btn btn-small btn-danger" onclick="deviceDelete('${d.client_name}','${escapeHtml(d.label)}')">🗑</button>
+        </div>`).join('');
+      const addDev = u.status === 'approved' ? `<div style="display:flex;gap:0.5rem;padding:0.5rem 0 0 1.5rem;flex-wrap:wrap;">
+          <input type="text" id="newdev-${u.username}" placeholder="новое устройство (ноутбук...)" maxlength="24" style="flex:1;min-width:150px;padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);">
+          <button class="btn btn-small" onclick="userAddDevice('${u.username}')">➕ Добавить конфиг</button>
+        </div>` : '';
+      return `<div style="border:1px solid var(--border);border-radius:12px;padding:1rem;margin-bottom:0.75rem;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <div><strong>${escapeHtml(u.username)}</strong> ${badges[u.status] || u.status}
+            <div style="font-size:0.8rem;color:var(--text-muted);">${escapeHtml(u.email)}</div>
+          </div>
+          <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">${actions}</div>
+        </div>
+        ${devRows}${addDev}
+      </div>`;
+    }).join('');
+  } catch(e) { box.innerHTML = `<div class="alert err">❌ ${escapeHtml(e.message)}</div>`; }
+}
+
+async function userAction(action, username, label) {
+  showLoader(action === 'approve' ? `Одобрение ${label}...` : `Отклонение ${label}...`);
+  try {
+    const r = await fetch(BASE_URL + `/api/users/${action}/${username}`, {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); }
+}
+
+async function userDelete(username, label, devCount) {
+  if (!confirm(`Удалить пользователя ${label}?\nБудут удалены все его конфиги (${devCount} шт).`)) return;
+  showLoader(`Удаление ${label}...`);
+  try {
+    const r = await fetch(BASE_URL + `/api/users/delete/${username}`, {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); fetchClients(); }
+}
+
+async function deviceDelete(clientName, label) {
+  if (!confirm(`Удалить конфиг «${label}» (${clientName})?`)) return;
+  showLoader('Удаление конфига...');
+  try {
+    const r = await fetch(BASE_URL + `/api/devices/delete/${clientName}`, {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); fetchClients(); }
+}
+
+async function userAddDevice(username) {
+  const inp = document.getElementById(`newdev-${username}`);
+  const label = (inp.value || '').trim();
+  if (!label) { alert('Введите название устройства'); return; }
+  showLoader('Создание конфига... (до минуты)');
+  try {
+    const r = await fetch(BASE_URL + '/api/users/add-device', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, label})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    inp.value = '';
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); fetchClients(); }
+}
+
+async function userNotify(username, label) {
+  if (!confirm(`Отправить ${label} письмо «обновите конфиги»?`)) return;
+  showLoader('Отправка письма...');
+  try {
+    const r = await fetch(BASE_URL + `/api/users/notify/${username}`, {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    alert('✅ Письмо отправлено');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
+}
+
+async function userResetPass(username, label) {
+  const pwd = prompt(`Новый пароль для ${label} (минимум 8 символов):`);
+  if (pwd === null) return;
+  if (pwd.length < 8) { alert('Минимум 8 символов'); return; }
+  showLoader('Смена пароля...');
+  try {
+    const r = await fetch(BASE_URL + `/api/users/reset-pass/${username}`, {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: pwd})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    alert('✅ Пароль изменён. Передайте его пользователю.');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
+}
+
+// ==================== Mail settings ====================
+async function loadMail() {
+  try {
+    const r = await fetch(BASE_URL + '/api/mail/settings', {credentials:'same-origin'});
+    if (!r.ok) return;
+    const d = await r.json();
+    document.getElementById('mail-status').innerHTML = d.configured
+      ? '<div class="alert ok">✅ SMTP настроен</div>'
+      : '<div class="alert err">⚠️ SMTP не настроен — письма абонентам не отправляются</div>';
+    document.getElementById('smtp-host').value = d.host || '';
+    document.getElementById('smtp-port').value = d.port || '465';
+    document.getElementById('smtp-user').value = d.user || '';
+    document.getElementById('smtp-from').value = d.from || '';
+  } catch(e) {}
+}
+
+async function saveMail() {
+  showLoader('Сохранение настроек почты...');
+  try {
+    const r = await fetch(BASE_URL + '/api/mail/settings', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({host: document.getElementById('smtp-host').value.trim(),
+        port: document.getElementById('smtp-port').value.trim(),
+        user: document.getElementById('smtp-user').value.trim(),
+        password: document.getElementById('smtp-pass').value,
+        from: document.getElementById('smtp-from').value.trim()})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    document.getElementById('smtp-pass').value = '';
+    await loadMail();
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
+}
+
+async function testMail() {
+  const to = prompt('На какой email отправить тестовое письмо?');
+  if (!to) return;
+  showLoader('Отправка тестового письма...');
+  try {
+    const r = await fetch(BASE_URL + '/api/mail/test', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({to: to.trim()})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+    alert('✅ Письмо отправлено, проверьте почту (и спам).');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); }
 }
 
 // ==================== Protocols ====================
@@ -1261,6 +1774,18 @@ initLanStatus();
 document.querySelector('th[data-sort="ip"]').classList.add('sort-asc');
 setSort('ip');
 startPolling();
+// Бейдж с числом заявок на регистрации — обновляем в фоне
+async function pollPendingUsers() {
+  try {
+    const r = await fetch(BASE_URL + '/api/users', {credentials:'same-origin'});
+    if (!r.ok) return;
+    const list = await r.json();
+    const pending = list.filter(u => u.status === 'pending').length;
+    document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
+  } catch(e) {}
+}
+pollPendingUsers();
+setInterval(pollPendingUsers, 15000);
 
 </script>
 </body>
@@ -1360,6 +1885,24 @@ def load_notify_conf():
         except Exception:
             pass
     return cfg
+
+def tg_send_buttons(text: str, rows: list):
+    """Сообщение админу с inline-кнопками (например, одобрение заявки)."""
+    cfg = load_notify_conf()
+    token = cfg.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = re.split(r"[,\s]+", cfg.get("TELEGRAM_CHAT_ID", ""))[0]
+    if not (token and chat_id):
+        return
+    try:
+        import urllib.parse
+        data = urllib.parse.urlencode({
+            "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+            "reply_markup": json.dumps({"inline_keyboard": rows}, ensure_ascii=False),
+        }).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception:
+        pass
 
 @app.get("/api/notify/status")
 async def api_notify_status(request: Request):
@@ -1763,6 +2306,484 @@ async def dl_vpn(request: Request, name: str):
     current_user(request)
     n = re.sub(r"[^a-zA-Z0-9_-]", "", name)
     return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn.txt")
+
+# ================ Клиентский портал: регистрация, вход, кабинет ================
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{3,32}$")
+EMAIL_RE    = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[a-zA-Z]{2,}$")
+DEVICE_LABEL_RE = re.compile(r"^[0-9a-zA-Zа-яА-ЯёЁ _-]{1,24}$")
+
+def render_user_page(title, body, error="", ok=""):
+    err = f'<div class="error-msg">{error}</div>' if error else ""
+    okh = f'<div class="ok-msg">{ok}</div>' if ok else ""
+    return (USER_AUTH_TEMPLATE.replace("__TITLE__", title).replace("__ERR__", err)
+            .replace("__OK__", okh).replace("__BODY__", body).replace("__LABEL__", SERVER_LABEL)
+            .replace("__BASE__", BASE_URL))
+
+REGISTER_BODY = """<form method="post" action="__BASE__/register">
+  <div class="input-group"><input type="text" name="username" placeholder="Логин (латиница, 3-32 символа)" required autocomplete="username"></div>
+  <div class="input-group"><input type="email" name="email" placeholder="Email для уведомлений" required autocomplete="email"></div>
+  <div class="input-group"><input type="password" name="password" placeholder="Пароль (минимум 8 символов)" required autocomplete="new-password"></div>
+  <div class="input-group"><input type="password" name="password2" placeholder="Повторите пароль" required autocomplete="new-password"></div>
+  <button type="submit">Зарегистрироваться</button>
+</form>
+<div class="links">Уже есть аккаунт? <a href="__BASE__/ulogin">Войти</a></div>"""
+
+ULOGIN_BODY = """<form method="post" action="__BASE__/ulogin">
+  <div class="input-group"><input type="text" name="username" placeholder="Логин" required autofocus autocomplete="username"></div>
+  <div class="input-group"><input type="password" name="password" placeholder="Пароль" required autocomplete="current-password"></div>
+  <button type="submit">Войти</button>
+</form>
+<div class="links">Нет аккаунта? <a href="__BASE__/register">Регистрация</a></div>"""
+
+@app.get("/register", response_class=HTMLResponse)
+async def register_page(request: Request, error: str = "", ok: str = ""):
+    return render_user_page("Регистрация", REGISTER_BODY.replace("__BASE__", BASE_URL), error, ok)
+
+@app.post("/register")
+async def register_submit(request: Request, username: str = Form(...), email: str = Form(...),
+                          password: str = Form(...), password2: str = Form(...)):
+    username = username.strip()
+    email = email.strip().lower()
+    def fail(msg):
+        return RedirectResponse(f"{BASE_URL}/register?error={urllib.parse.quote_plus(msg)}", status_code=303)
+    if not USERNAME_RE.fullmatch(username):
+        return fail("Логин: латиница/цифры/_/-, 3-32 символа")
+    if not EMAIL_RE.fullmatch(email):
+        return fail("Некорректный email")
+    if len(password) < 8:
+        return fail("Пароль должен быть не короче 8 символов")
+    if password != password2:
+        return fail("Пароли не совпадают")
+    try:
+        admin_user, _, _ = load_credentials()
+        if username.lower() == admin_user.lower():
+            return fail("Этот логин занят")
+    except RuntimeError:
+        pass
+    conn = users_db()
+    exists = conn.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
+    if exists:
+        conn.close()
+        return fail("Этот логин занят")
+    conn.execute("INSERT INTO users(username,email,pass_hash,status,created_ts) VALUES(?,?,?,?,?)",
+                 (username, email, hash_password(password), "pending", int(time.time())))
+    conn.commit()
+    conn.close()
+    tg_send_buttons(
+        f"🆕 <b>Заявка на регистрацию</b>\nЛогин: <code>{username}</code>\nEmail: <code>{email}</code>",
+        [[{"text": "✅ Одобрить", "callback_data": f"ureg:ok:{username}"},
+          {"text": "❌ Отклонить", "callback_data": f"ureg:no:{username}"}]])
+    _notify(f"🆕 <b>Заявка на регистрацию</b>\nЛогин: <code>{username}</code>\nОдобрите во вкладке «Пользователи» или кнопкой выше.")
+    return RedirectResponse(
+        f"{BASE_URL}/register?ok={urllib.parse.quote_plus('Заявка отправлена! После одобрения администратором вы сможете войти в личный кабинет.')}",
+        status_code=303)
+
+@app.get("/ulogin", response_class=HTMLResponse)
+async def ulogin_page(request: Request, error: str = ""):
+    if check_user_token(request.cookies.get(USER_COOKIE, "")):
+        return RedirectResponse(f"{BASE_URL}/cabinet", status_code=303)
+    return render_user_page("Вход в личный кабинет", ULOGIN_BODY.replace("__BASE__", BASE_URL), error)
+
+@app.post("/ulogin")
+async def ulogin_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+    ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if _login_blocked(ip):
+        return RedirectResponse(
+            f"{BASE_URL}/ulogin?error=Слишком+много+попыток.+Подождите+10+минут", status_code=303)
+    u = get_user(username.strip())
+    ok = False
+    if u:
+        try:
+            _, salt, hexd = u["pass_hash"].split(":", 2)
+            ok = hmac.compare_digest(hashlib.sha256((salt + password).encode()).hexdigest(), hexd)
+        except ValueError:
+            ok = False
+    if not ok:
+        _register_login_fail(ip, username)
+        await asyncio.sleep(1)
+        return RedirectResponse(f"{BASE_URL}/ulogin?error=Неверный+логин+или+пароль", status_code=303)
+    if u["status"] == "pending":
+        return RedirectResponse(
+            f"{BASE_URL}/ulogin?error={urllib.parse.quote_plus('Заявка ещё на рассмотрении у администратора')}",
+            status_code=303)
+    if u["status"] != "approved":
+        return RedirectResponse(
+            f"{BASE_URL}/ulogin?error={urllib.parse.quote_plus('Заявка отклонена. Свяжитесь с администратором')}",
+            status_code=303)
+    _clear_login_fails(ip)
+    r = RedirectResponse(f"{BASE_URL}/cabinet", status_code=303)
+    r.set_cookie(USER_COOKIE, make_user_token(u["username"], int(time.time())), max_age=SESSION_DAYS*86400,
+                 httponly=True, secure=True, samesite="lax", path="/")
+    return r
+
+@app.get("/ulogout")
+async def ulogout():
+    r = RedirectResponse(f"{BASE_URL}/ulogin", status_code=303)
+    r.delete_cookie(USER_COOKIE, path="/")
+    return r
+
+@app.exception_handler(RedirectToUserLogin)
+async def _rtul(request: Request, exc: RedirectToUserLogin):
+    return RedirectResponse(f"{BASE_URL}/ulogin", status_code=303)
+
+@app.get("/cabinet", response_class=HTMLResponse)
+async def cabinet_page(request: Request):
+    username = current_client(request)
+    return (CABINET_TEMPLATE.replace("__USERNAME__", username)
+            .replace("__LABEL__", SERVER_LABEL).replace("__BASE__", BASE_URL))
+
+# --- общий хелпер создания/удаления конфига-устройства ---
+def device_client_name(owner: str, label: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", label).strip("_")[:24] or "dev"
+    return f"{owner}-{slug}"
+
+def create_device(owner: str, label: str) -> tuple:
+    """(ok, client_name_or_error)"""
+    label = label.strip()
+    if not DEVICE_LABEL_RE.fullmatch(label):
+        return False, "Название: буквы/цифры/пробел/_/-, до 24 символов"
+    conn = users_db()
+    cnt = conn.execute("SELECT COUNT(*) FROM devices WHERE owner=?", (owner,)).fetchone()[0]
+    if cnt >= MAX_DEVICES_PER_USER:
+        conn.close()
+        return False, f"Лимит: не более {MAX_DEVICES_PER_USER} устройств"
+    client_name = device_client_name(owner, label)
+    if conn.execute("SELECT 1 FROM devices WHERE client_name=?", (client_name,)).fetchone() \
+            or os.path.exists(os.path.join(CLIENTS_DIR, f"{client_name}.conf")):
+        conn.close()
+        return False, "Устройство с таким названием уже есть — выберите другое"
+    conn.execute("INSERT INTO devices(client_name,owner,label,created_ts) VALUES(?,?,?,?)",
+                 (client_name, owner, label, int(time.time())))
+    conn.commit()
+    conn.close()
+    ok, out, err = srv_exec(f"printf 'y\\n' | {ADD_SCRIPT} {shlex.quote(client_name)}", 120)
+    if not ok:
+        conn = users_db()
+        conn.execute("DELETE FROM devices WHERE client_name=?", (client_name,))
+        conn.commit()
+        conn.close()
+        return False, ((err or "") + (out or "")).strip()[-200:] or "Ошибка создания конфига"
+    _clients_cache["ts"] = 0.0
+    _backup_async()
+    return True, client_name
+
+def delete_device(client_name: str, owner: str = "") -> tuple:
+    """(ok, error). owner задан — проверяем владельца (кабинет)."""
+    conn = users_db()
+    row = conn.execute("SELECT owner FROM devices WHERE client_name=?", (client_name,)).fetchone()
+    if not row:
+        conn.close()
+        return False, "Конфиг не найден"
+    if owner and row[0] != owner:
+        conn.close()
+        return False, "Это не ваш конфиг"
+    conn.execute("DELETE FROM devices WHERE client_name=?", (client_name,))
+    conn.commit()
+    conn.close()
+    ok, out, err = srv_exec(f"printf 'y\\n' | {REMOVE_SCRIPT} {shlex.quote(client_name)}", 90)
+    _clients_cache["ts"] = 0.0
+    _backup_async()
+    if not ok:
+        return False, ((err or "") + (out or "")).strip()[-200:] or "Ошибка удаления"
+    return True, ""
+
+def _devices_status_map():
+    """client_name -> (status, ip) по живому dump и конфигу."""
+    live = get_live_dump()
+    peers = {}
+    try:
+        if not REMOTE_MODE and os.path.exists(AWG_CONF):
+            with open(AWG_CONF, encoding="utf-8") as f:
+                content = f.read()
+        else:
+            content = srv_read(AWG_CONF) or ""
+        for block in re.split(r"\n(?=\[Peer\])", content):
+            nm = re.search(r"#\s*Client:\s*(\S+)", block)
+            pk = re.search(r"PublicKey\s*=\s*(\S+)", block)
+            ip = re.search(r"AllowedIPs\s*=\s*([0-9.]+)", block)
+            if nm and pk:
+                peers[nm.group(1)] = (pk.group(1), ip.group(1) if ip else "")
+    except Exception:
+        pass
+    now = time.time()
+    result = {}
+    for name, (pk, ip) in peers.items():
+        hs = live.get(pk, {}).get("hs", 0)
+        status = "ONLINE" if hs and now - hs <= 180 else ("OFFLINE" if hs else "NEVER")
+        result[name] = (status, ip)
+    return result
+
+@app.get("/api/cabinet/devices")
+async def api_cabinet_devices(request: Request):
+    username = current_client(request)
+    conn = users_db()
+    rows = conn.execute(
+        "SELECT client_name, label, created_ts FROM devices WHERE owner=? ORDER BY created_ts",
+        (username,)).fetchall()
+    conn.close()
+    statuses = await run_in_threadpool(_devices_status_map)
+    return JSONResponse([
+        {"client_name": r[0], "label": r[1], "created_ts": r[2],
+         "status": statuses.get(r[0], ("NEVER", ""))[0], "ip": statuses.get(r[0], ("", ""))[1]}
+        for r in rows])
+
+@app.post("/api/cabinet/devices/add")
+async def api_cabinet_add(request: Request):
+    username = current_client(request)
+    body = await request.json()
+    ok, res = await run_in_threadpool(create_device, username, str(body.get("label", "")))
+    if not ok:
+        return JSONResponse({"error": res}, status_code=400)
+    _notify(f"📱 <b>Новое устройство</b> (кабинет)\nПользователь: <code>{username}</code>\nКонфиг: <code>{res}</code>")
+    return {"ok": True, "client_name": res}
+
+@app.post("/api/cabinet/devices/del")
+async def api_cabinet_del(request: Request):
+    username = current_client(request)
+    body = await request.json()
+    client_name = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("client_name", "")))
+    ok, err = await run_in_threadpool(delete_device, client_name, username)
+    if not ok:
+        return JSONResponse({"error": err}, status_code=400)
+    return {"ok": True}
+
+def _check_device_owner(request: Request, client_name: str) -> str:
+    username = current_client(request)
+    n = re.sub(r"[^a-zA-Z0-9_-]", "", client_name)
+    conn = users_db()
+    row = conn.execute("SELECT owner FROM devices WHERE client_name=?", (n,)).fetchone()
+    conn.close()
+    if not row or row[0] != username:
+        raise HTTPException(403, "Это не ваш конфиг")
+    return n
+
+@app.get("/cabinet/dl/conf/{client_name}")
+async def cabinet_dl_conf(request: Request, client_name: str):
+    n = _check_device_owner(request, client_name)
+    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.conf"), f"{n}.conf")
+
+@app.get("/cabinet/dl/vpn/{client_name}")
+async def cabinet_dl_vpn(request: Request, client_name: str):
+    n = _check_device_owner(request, client_name)
+    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn.txt")
+
+# ================ Админка: управление пользователями ================
+def _list_users():
+    conn = users_db()
+    users = [dict(zip(("username", "email", "status", "created_ts"), r))
+             for r in conn.execute(
+                 "SELECT username, email, status, created_ts FROM users ORDER BY created_ts DESC").fetchall()]
+    devs = conn.execute("SELECT client_name, owner, label, created_ts FROM devices ORDER BY created_ts").fetchall()
+    conn.close()
+    by_owner = {}
+    for d in devs:
+        by_owner.setdefault(d[1], []).append({"client_name": d[0], "label": d[2], "created_ts": d[3]})
+    for u in users:
+        u["devices"] = by_owner.get(u["username"], [])
+    return users
+
+@app.get("/api/users")
+async def api_users(request: Request):
+    current_user(request)
+    return JSONResponse(await run_in_threadpool(_list_users))
+
+def _approve_user(username: str) -> tuple:
+    u = get_user(username)
+    if not u:
+        return False, "Пользователь не найден"
+    conn = users_db()
+    conn.execute("UPDATE users SET status='approved' WHERE username=?", (u["username"],))
+    conn.commit()
+    conn.close()
+    link = f"{public_base_url()}{BASE_URL}/ulogin"
+    send_mail(u["email"], f"{SERVER_LABEL}: доступ одобрен",
+              f"Здравствуйте, {u['username']}!\n\n"
+              f"Ваша заявка одобрена. Личный кабинет: {link}\n"
+              f"В кабинете вы можете создавать конфиги для своих устройств и скачивать их.\n")
+    return True, "OK"
+
+def _reject_user(username: str) -> tuple:
+    u = get_user(username)
+    if not u:
+        return False, "Пользователь не найден"
+    conn = users_db()
+    conn.execute("UPDATE users SET status='rejected' WHERE username=?", (u["username"],))
+    conn.commit()
+    conn.close()
+    return True, "OK"
+
+@app.post("/api/users/approve/{username}")
+async def api_user_approve(request: Request, username: str):
+    current_user(request)
+    ok, msg = await run_in_threadpool(_approve_user, username)
+    if not ok:
+        return JSONResponse({"error": msg}, status_code=404)
+    _notify(f"✅ <b>Заявка одобрена</b>\nПользователь: <code>{username}</code>")
+    return {"ok": True}
+
+@app.post("/api/users/reject/{username}")
+async def api_user_reject(request: Request, username: str):
+    current_user(request)
+    ok, msg = await run_in_threadpool(_reject_user, username)
+    if not ok:
+        return JSONResponse({"error": msg}, status_code=404)
+    _notify(f"❌ <b>Заявка отклонена</b>\nПользователь: <code>{username}</code>")
+    return {"ok": True}
+
+@app.post("/api/users/delete/{username}")
+async def api_user_delete(request: Request, username: str):
+    current_user(request)
+    n = re.sub(r"[^a-zA-Z0-9_-]", "", username)
+    conn = users_db()
+    devs = [r[0] for r in conn.execute("SELECT client_name FROM devices WHERE owner=?", (n,)).fetchall()]
+    conn.close()
+    for d in devs:
+        await run_in_threadpool(delete_device, d)
+    conn = users_db()
+    conn.execute("DELETE FROM users WHERE username=?", (n,))
+    conn.commit()
+    conn.close()
+    _notify(f"🗑 <b>Пользователь удалён</b>\nЛогин: <code>{n}</code>, конфигов удалено: {len(devs)}")
+    return {"ok": True, "devices_removed": len(devs)}
+
+@app.post("/api/users/add-device")
+async def api_user_add_device(request: Request):
+    current_user(request)
+    body = await request.json()
+    username = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("username", "")))
+    u = await run_in_threadpool(get_user, username)
+    if not u:
+        return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
+    ok, res = await run_in_threadpool(create_device, username, str(body.get("label", "")))
+    if not ok:
+        return JSONResponse({"error": res}, status_code=400)
+    return {"ok": True, "client_name": res}
+
+@app.post("/api/devices/delete/{client_name}")
+async def api_device_delete(request: Request, client_name: str):
+    current_user(request)
+    n = re.sub(r"[^a-zA-Z0-9_-]", "", client_name)
+    ok, err = await run_in_threadpool(delete_device, n)
+    if not ok:
+        return JSONResponse({"error": err}, status_code=400)
+    return {"ok": True}
+
+@app.post("/api/users/notify/{username}")
+async def api_user_notify(request: Request, username: str):
+    current_user(request)
+    u = await run_in_threadpool(get_user, username)
+    if not u:
+        return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
+    ok, msg = await run_in_threadpool(
+        send_mail, u["email"], f"{SERVER_LABEL}: обновите конфиги VPN",
+        f"Здравствуйте, {u['username']}!\n\n"
+        f"Настройки сервера изменились. Зайдите в личный кабинет и заново "
+        f"скачайте конфиги для своих устройств:\n{public_base_url()}{BASE_URL}/ulogin\n")
+    if not ok:
+        return JSONResponse({"error": msg}, status_code=500)
+    return {"ok": True}
+
+@app.post("/api/users/reset-pass/{username}")
+async def api_user_reset_pass(request: Request, username: str):
+    current_user(request)
+    n = re.sub(r"[^a-zA-Z0-9_-]", "", username)
+    body = await request.json()
+    new_pass = str(body.get("password", ""))
+    if len(new_pass) < 8:
+        return JSONResponse({"error": "Пароль должен быть не короче 8 символов"}, status_code=400)
+    conn = users_db()
+    cur = conn.execute("UPDATE users SET pass_hash=? WHERE username=?", (hash_password(new_pass), n))
+    conn.commit()
+    found = cur.rowcount > 0
+    conn.close()
+    if not found:
+        return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
+    return {"ok": True}
+
+# --- настройки SMTP (вкладка «Пользователи») ---
+@app.get("/api/mail/settings")
+async def api_mail_get(request: Request):
+    current_user(request)
+    cfg = load_mail_conf()
+    pwd = cfg.get("SMTP_PASS", "")
+    return {"configured": bool(cfg.get("SMTP_HOST") and (cfg.get("SMTP_FROM") or cfg.get("SMTP_USER"))),
+            "host": cfg.get("SMTP_HOST", ""), "port": cfg.get("SMTP_PORT", "465"),
+            "user": cfg.get("SMTP_USER", ""), "from": cfg.get("SMTP_FROM", ""),
+            "pass_masked": "********" if pwd else ""}
+
+@app.post("/api/mail/settings")
+async def api_mail_save(request: Request):
+    current_user(request)
+    body = await request.json()
+    host = str(body.get("host", "")).strip()
+    port = str(body.get("port", "465")).strip() or "465"
+    user = str(body.get("user", "")).strip()
+    pwd = str(body.get("password", "")).strip()
+    from_addr = str(body.get("from", "")).strip()
+    if host and not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
+        return JSONResponse({"error": "Некорректный SMTP-хост"}, status_code=400)
+    if not re.fullmatch(r"\d{1,5}", port):
+        return JSONResponse({"error": "Некорректный порт"}, status_code=400)
+    if not pwd:
+        pwd = load_mail_conf().get("SMTP_PASS", "")
+    try:
+        with open(MAIL_CONF, "w", encoding="utf-8") as f:
+            f.write(f'SMTP_HOST="{host}"\nSMTP_PORT="{port}"\nSMTP_USER="{user}"\n'
+                    f'SMTP_PASS="{pwd}"\nSMTP_FROM="{from_addr}"\n')
+        os.chmod(MAIL_CONF, 0o600)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"ok": True}
+
+@app.post("/api/mail/test")
+async def api_mail_test(request: Request):
+    current_user(request)
+    body = await request.json()
+    to_addr = str(body.get("to", "")).strip()
+    if not EMAIL_RE.fullmatch(to_addr):
+        return JSONResponse({"error": "Некорректный email"}, status_code=400)
+    ok, msg = await run_in_threadpool(
+        send_mail, to_addr, f"{SERVER_LABEL}: тест почтовых уведомлений",
+        "Это тестовое письмо от панели AmneziaWG. Если вы его видите — SMTP настроен верно.\n")
+    if not ok:
+        return JSONResponse({"error": msg}, status_code=500)
+    return {"ok": True}
+
+# --- точка входа для бота (одобрение/отклонение заявок кнопками) ---
+def _bot_authorized(request: Request) -> bool:
+    return request.headers.get("x-panel-token", "") == get_api_token()
+
+@app.get("/api/bot/pending")
+async def api_bot_pending(request: Request):
+    if not _bot_authorized(request):
+        raise HTTPException(403, "forbidden")
+    def _q():
+        conn = users_db()
+        rows = conn.execute(
+            "SELECT username, email, created_ts FROM users WHERE status='pending' ORDER BY created_ts").fetchall()
+        conn.close()
+        return [{"username": r[0], "email": r[1], "created_ts": r[2]} for r in rows]
+    return JSONResponse(await run_in_threadpool(_q))
+
+@app.post("/api/bot/user-decision")
+async def api_bot_user_decision(request: Request):
+    if request.headers.get("x-panel-token", "") != get_api_token():
+        raise HTTPException(403, "forbidden")
+    body = await request.json()
+    username = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("username", "")))
+    decision = str(body.get("decision", ""))
+    u = await run_in_threadpool(get_user, username)
+    if not u:
+        return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
+    if u["status"] != "pending":
+        return JSONResponse({"error": f"Заявка уже обработана (статус: {u['status']})"}, status_code=400)
+    if decision == "approve":
+        await run_in_threadpool(_approve_user, username)
+        return {"ok": True, "text": f"✅ {username} одобрен"}
+    if decision == "reject":
+        await run_in_threadpool(_reject_user, username)
+        return {"ok": True, "text": f"❌ {username} отклонён"}
+    return JSONResponse({"error": "unknown decision"}, status_code=400)
 
 if __name__ == "__main__":
     kwargs = { "host": BIND_HOST, "port": 8000, "log_level": "info", "access_log": False, "server_header": False }

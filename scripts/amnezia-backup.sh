@@ -37,7 +37,10 @@ for f in \
     /etc/amnezia-panel.conf \
     /etc/amnezia-stealth.conf \
     /etc/amnezia-backup-cloud.conf \
-    /var/lib/amnezia-panel/servers.json
+    /etc/amnezia-mail.conf \
+    /etc/amnezia-notify.conf \
+    /var/lib/amnezia-panel/servers.json \
+    /var/lib/amnezia-panel/users.db
 do
     [[ -f "$f" ]] && FILES+=("${f#/}")
 done
