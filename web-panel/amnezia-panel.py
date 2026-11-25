@@ -665,51 +665,63 @@ CABINET_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Мои конфиги — __LABEL__</title>
+<title>Мои устройства — __LABEL__</title>
 <style>
   :root { --bg: #f2f2f7; --surface: #ffffff; --text: #1d1d1f; --text-muted: #86868b; --border: #e5e5ea; --primary: #0071e3; --primary-hover: #0077ed; --danger: #d93025; --online: #34c759; --offline: #ff9500; --never: #8e8e93; --header-bg: #1d1d1f; --header-text: #ffffff; }
   html[data-theme="dark"] { --bg: #1c1c1e; --surface: #2c2c2e; --text: #f5f5f7; --text-muted: #98989d; --border: #48484a; --primary: #0a84ff; --primary-hover: #409cff; --header-bg: #000000; }
-  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; transition: background-color 0.2s, border-color 0.2s; }
   body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; }
   header { background: var(--header-bg); color: var(--header-text); padding: 1rem; }
-  .header-content { max-width: 800px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
+  .header-content { max-width: 800px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
   header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
   header .sub { font-size: 0.8rem; opacity: 0.7; margin-top: 0.2rem; }
-  .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.4); color: var(--header-text); padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; text-decoration: none; cursor: pointer; }
+  .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.4); color: var(--header-text); padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; text-decoration: none; cursor: pointer; white-space: nowrap; }
   .container { max-width: 800px; margin: 0 auto; padding: 1rem; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1rem; }
-  .device { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.75rem; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 0.6rem; }
-  .device .name { font-weight: 600; flex: 1; min-width: 120px; }
-  .badge { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 20px; font-weight: 600; }
+  .device { padding: 0.9rem; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 0.75rem; }
+  .device-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .device .name { font-weight: 600; flex: 1; min-width: 100px; }
+  .badge { font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 20px; font-weight: 600; }
   .b-on { background: rgba(52,199,89,0.15); color: var(--online); }
   .b-off { background: rgba(255,149,0,0.15); color: var(--offline); }
   .b-never { background: rgba(142,142,147,0.15); color: var(--never); }
-  .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 0.45rem 0.8rem; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; }
+  .device-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem; }
+  .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.85rem; cursor: pointer; text-decoration: none; display: inline-block; }
   .btn:hover { background: var(--primary-hover); }
+  .btn-secondary { background: transparent; color: var(--primary); border: 1px solid var(--primary); }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   input { padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); font-size: 0.95rem; }
   .muted { color: var(--text-muted); font-size: 0.85rem; }
   .alert { padding: 0.8rem 1rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.9rem; display: none; }
   .alert.ok { display: block; background: rgba(52,199,89,0.12); color: var(--online); }
   .alert.err { display: block; background: rgba(217,48,37,0.12); color: var(--danger); }
-  .vpn-link { word-break: break-all; font-size: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; margin-top: 0.5rem; display: none; }
+  .code-box { word-break: break-all; font-size: 0.72rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; margin-top: 0.6rem; display: none; max-height: 220px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  @media (max-width: 600px) {
+    .container { padding: 0.75rem; }
+    .card { padding: 1rem; border-radius: 12px; }
+    .device-actions .btn { flex: 1 1 45%; text-align: center; }
+    header h1 { font-size: 1rem; }
+  }
 </style>
 </head>
 <body>
 <header>
   <div class="header-content">
     <div><h1>🛡️ __LABEL__</h1><div class="sub">Личный кабинет: __USERNAME__</div></div>
-    <a href="__BASE__/ulogout" class="btn-ghost">🚪 Выход</a>
+    <div style="display:flex;gap:0.4rem;">
+      <button class="btn-ghost" onclick="toggleTheme()" id="theme-btn">🌙</button>
+      <a href="__BASE__/ulogout" class="btn-ghost">🚪 Выход</a>
+    </div>
   </div>
 </header>
 <div class="container">
   <div id="cab-alert" class="alert"></div>
   <div class="card">
     <h3 style="margin-top:0;">➕ Добавить устройство</h3>
-    <p class="muted">Для каждого устройства (телефон, ноутбук, телевизор) создаётся отдельный конфиг.</p>
+    <p class="muted">Для каждого устройства (телефон, ноутбук, телевизор) создаётся отдельный набор настроек.</p>
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-      <input type="text" id="new-device" placeholder="Название, например: телефон" maxlength="24" style="flex:1;min-width:180px;" autocomplete="off">
-      <button class="btn" onclick="addDevice()">Создать конфиг</button>
+      <input type="text" id="new-device" placeholder="Название, например: телефон" maxlength="24" style="flex:1;min-width:160px;" autocomplete="off">
+      <button class="btn" onclick="addDevice()">Создать</button>
     </div>
   </div>
   <div class="card">
@@ -717,13 +729,17 @@ CABINET_TEMPLATE = r"""<!DOCTYPE html>
     <div id="devices-list"><div class="muted">Загрузка...</div></div>
   </div>
   <div class="card muted">
-    <b>Как подключиться:</b> установите приложение AmneziaVPN → «Добавить профиль» →
-    вставьте vpn:// ссылку или импортируйте скачанный .conf файл.
+    <b>Как подключиться:</b><br>
+    • <b>AmneziaVPN</b> (Android, ПК) — «Добавить профиль» → вставьте <b>vpn://</b> ссылку или импортируйте файл <b>.conf</b>.<br>
+    • <b>AmneziaWG</b> (iPhone/iPad — доступен в App Store РФ, когда AmneziaVPN скачать нельзя) — «+» → импорт файла <b>.conf</b>.<br>
+    Содержимое файла можно посмотреть кнопкой «👁 Показать» и скопировать вручную.
   </div>
 </div>
 <script>
 const BASE_URL = "__BASE__";
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function initTheme(){const t=localStorage.getItem('theme')||'light';document.documentElement.setAttribute('data-theme',t);document.getElementById('theme-btn').textContent=t==='dark'?'☀️':'🌙';}
+function toggleTheme(){const n=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);localStorage.setItem('theme',n);document.getElementById('theme-btn').textContent=n==='dark'?'☀️':'🌙';}
 function alertBox(kind, txt){const a=document.getElementById('cab-alert');a.className='alert '+kind;a.textContent=txt;if(txt)setTimeout(()=>{a.className='alert';},6000);}
 async function loadDevices(){
   try {
@@ -737,11 +753,17 @@ async function loadDevices(){
                   : d.status === 'OFFLINE' ? '<span class="badge b-off">офлайн</span>'
                   : '<span class="badge b-never">не подключался</span>';
       return `<div class="device">
-        <div class="name">${esc(d.label)} ${badge}<div class="muted">${esc(d.client_name)} · ${esc(d.ip||'')}</div></div>
-        <a class="btn" href="${BASE_URL}/cabinet/dl/conf/${encodeURIComponent(d.client_name)}">⬇ .conf</a>
-        <button class="btn" onclick="showVpn('${esc(d.client_name)}')">🔗 vpn://</button>
-        <button class="btn btn-danger" onclick="delDevice('${esc(d.client_name)}','${esc(d.label)}')">🗑</button>
-        <div class="vpn-link" id="vpn-${esc(d.client_name)}"></div>
+        <div class="device-head">
+          <div class="name">${esc(d.label)} ${badge}</div>
+          <button class="btn btn-danger" onclick="delDevice('${esc(d.client_name)}','${esc(d.label)}')">🗑 Удалить</button>
+        </div>
+        <div class="muted" style="margin-top:0.3rem;">${esc(d.client_name)} · ${esc(d.ip||'')}</div>
+        <div class="device-actions">
+          <a class="btn" href="${BASE_URL}/cabinet/dl/conf/${encodeURIComponent(d.client_name)}" title="Для приложений AmneziaWG и AmneziaVPN">⬇ .conf <span style="opacity:0.75;font-size:0.75em;">AmneziaWG / AmneziaVPN</span></a>
+          <button class="btn" onclick="showText('${esc(d.client_name)}','vpn')" title="Для приложения AmneziaVPN">🔗 vpn:// <span style="opacity:0.75;font-size:0.75em;">AmneziaVPN</span></button>
+          <button class="btn btn-secondary" onclick="showText('${esc(d.client_name)}','conf')">👁 Показать</button>
+        </div>
+        <div class="code-box" id="box-${esc(d.client_name)}"></div>
       </div>`;
     }).join('');
   } catch(e) { document.getElementById('devices-list').innerHTML = '<div class="muted">Ошибка загрузки</div>'; }
@@ -754,32 +776,38 @@ async function addDevice(){
   const d = await r.json();
   if (!r.ok) { alertBox('err', d.error || 'Ошибка'); return; }
   document.getElementById('new-device').value = '';
-  alertBox('ok', 'Конфиг «' + label + '» создан');
+  alertBox('ok', 'Настройки «' + label + '» созданы');
   loadDevices();
 }
 async function delDevice(clientName, label){
-  if (!confirm('Удалить конфиг «' + label + '»? Устройство потеряет доступ.')) return;
+  if (!confirm('Удалить «' + label + '»? Устройство потеряет доступ.')) return;
   const r = await fetch(BASE_URL + '/api/cabinet/devices/del', {method:'POST', credentials:'same-origin',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({client_name: clientName})});
   const d = await r.json();
   if (!r.ok) { alertBox('err', d.error || 'Ошибка'); return; }
-  alertBox('ok', 'Конфиг удалён');
+  alertBox('ok', 'Удалено');
   loadDevices();
 }
-async function showVpn(clientName){
-  const el = document.getElementById('vpn-' + clientName);
-  if (el.style.display === 'block') { el.style.display = 'none'; return; }
-  const r = await fetch(BASE_URL + '/cabinet/dl/vpn/' + encodeURIComponent(clientName), {credentials:'same-origin'});
-  if (!r.ok) { alertBox('err','Ссылка недоступна'); return; }
+async function showText(clientName, kind){
+  const el = document.getElementById('box-' + clientName);
+  if (el.style.display === 'block' && el.dataset.kind === kind) { el.style.display = 'none'; return; }
+  const url = kind === 'vpn'
+    ? BASE_URL + '/cabinet/dl/vpn/' + encodeURIComponent(clientName)
+    : BASE_URL + '/cabinet/dl/conf/' + encodeURIComponent(clientName) + '?raw=1';
+  const r = await fetch(url, {credentials:'same-origin'});
+  if (!r.ok) { alertBox('err','Не удалось загрузить'); return; }
   const txt = await r.text();
   el.textContent = txt;
+  el.dataset.kind = kind;
   el.style.display = 'block';
-  try { await navigator.clipboard.writeText(txt); alertBox('ok','vpn:// ссылка скопирована'); } catch(e) {}
+  try { await navigator.clipboard.writeText(txt); alertBox('ok', (kind==='vpn'?'vpn:// ссылка':'Содержимое') + ' скопировано в буфер обмена'); } catch(e) {}
 }
+initTheme();
 loadDevices();
 </script>
 </body>
 </html>"""
+
 
 PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ru" data-theme="light">
@@ -1243,6 +1271,7 @@ async function loadUsers() {
       const devRows = u.devices.map(d => `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.4rem 0.4rem 1.5rem;border-top:1px dashed var(--border);flex-wrap:wrap;">
           <span style="flex:1;min-width:120px;">└ ${escapeHtml(d.label)} <code style="font-size:0.75rem;color:var(--text-muted);">${escapeHtml(d.client_name)}</code></span>
           <a class="btn btn-small" href="${BASE_URL}/download/conf/${encodeURIComponent(d.client_name)}">⬇ .conf</a>
+          <a class="btn btn-small" href="${BASE_URL}/download/vpn/${encodeURIComponent(d.client_name)}">⬇ .vpn</a>
           <button class="btn btn-small btn-danger" onclick="deviceDelete('${d.client_name}','${escapeHtml(d.label)}')">🗑</button>
         </div>`).join('');
       const addDev = u.status === 'approved' ? `<div style="display:flex;gap:0.5rem;padding:0.5rem 0 0 1.5rem;flex-wrap:wrap;">
@@ -2091,10 +2120,13 @@ async def api_proto_action(request: Request, action: str, name: str):
             for u in users:
                 if u["status"] == "approved":
                     await run_in_threadpool(
-                        send_mail, u["email"], f"{SERVER_LABEL}: обновите конфиги VPN",
+                        send_mail, u["email"], f"{SERVER_LABEL}: обновление настроек",
                         f"Здравствуйте, {u['username']}!\n\n"
-                        f"Изменились настройки DNS сервера. Зайдите в личный кабинет и заново "
-                        f"скачайте конфиги для своих устройств:\n{client_portal_url()}/ulogin\n")
+                        f"На сервере обновились настройки подключения. Пожалуйста, зайдите "
+                        f"в личный кабинет и скачайте настройки для своих устройств заново — "
+                        f"старые могут перестать работать.\n\n"
+                        f"Личный кабинет: {client_portal_url()}/ulogin\n\n"
+                        f"Если у вас всё работает — просто проигнорируйте это письмо.\n")
         except Exception:
             pass
     if action in ("install", "remove"):
@@ -2371,7 +2403,8 @@ async def dl_conf(request: Request, name: str):
 async def dl_vpn(request: Request, name: str):
     current_user(request)
     n = re.sub(r"[^a-zA-Z0-9_-]", "", name)
-    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn.txt")
+    # Отдаём ссылку как .vpn (а не .txt) — пользователи не пугаются расширения
+    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn")
 
 # ================ Клиентский портал: регистрация, вход, кабинет ================
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{3,32}$")
@@ -2466,7 +2499,7 @@ async def register_submit(request: Request, username: str = Form(...), email: st
           {"text": "❌ Отклонить", "callback_data": f"ureg:no:{username}"}]])
     _notify(f"🆕 <b>Заявка на регистрацию</b>\nЛогин: <code>{username}</code>\nОдобрите во вкладке «Пользователи» или кнопкой выше.")
     return RedirectResponse(
-        f"{pfx}/register?ok={urllib.parse.quote_plus('Заявка отправлена! После одобрения администратором вы сможете войти в личный кабинет.')}",
+        f"{pfx}/register?ok={urllib.parse.quote_plus('Заявка принята! Ожидайте подтверждения от администратора — после одобрения вы сможете войти в личный кабинет.')}",
         status_code=303)
 
 @app.get("/ulogin", response_class=HTMLResponse)
@@ -2657,17 +2690,35 @@ def _check_device_owner(request: Request, client_name: str) -> str:
         raise HTTPException(403, "Это не ваш конфиг")
     return n
 
+def _read_client_file(path: str) -> str:
+    if REMOTE_MODE:
+        content = srv_read(path)
+        if content is None:
+            raise HTTPException(404, "Файл не найден")
+        return content
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Файл не найден")
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
 @app.get("/cabinet/dl/conf/{client_name}")
 @app.get("/cli/cabinet/dl/conf/{client_name}")
-async def cabinet_dl_conf(request: Request, client_name: str):
+async def cabinet_dl_conf(request: Request, client_name: str, raw: int = 0):
     n = _check_device_owner(request, client_name)
+    if raw:
+        # Просмотр содержимого прямо в браузере (без скачивания)
+        return Response(content=_read_conf_text(n), media_type="text/plain; charset=utf-8")
     return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.conf"), f"{n}.conf")
+
+def _read_conf_text(n: str) -> str:
+    return _read_client_file(os.path.join(CLIENTS_DIR, f"{n}.conf"))
 
 @app.get("/cabinet/dl/vpn/{client_name}")
 @app.get("/cli/cabinet/dl/vpn/{client_name}")
 async def cabinet_dl_vpn(request: Request, client_name: str):
     n = _check_device_owner(request, client_name)
-    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn.txt")
+    # Отдаём как .vpn (а не .txt) — пользователи не пугаются расширения
+    return _download_remote_or_local(os.path.join(CLIENTS_DIR, f"{n}.vpn.txt"), f"{n}.vpn")
 
 # ================ Админка: управление пользователями ================
 def _list_users():
@@ -2698,10 +2749,13 @@ def _approve_user(username: str) -> tuple:
     conn.commit()
     conn.close()
     link = f"{client_portal_url()}/ulogin"
-    send_mail(u["email"], f"{SERVER_LABEL}: доступ одобрен",
+    send_mail(u["email"], f"{SERVER_LABEL}: заявка подтверждена",
               f"Здравствуйте, {u['username']}!\n\n"
-              f"Ваша заявка одобрена. Личный кабинет: {link}\n"
-              f"В кабинете вы можете создавать конфиги для своих устройств и скачивать их.\n")
+              f"Хорошие новости — администратор подтвердил вашу заявку.\n"
+              f"Теперь вам доступен личный кабинет, где можно создать настройки "
+              f"для своих устройств (телефон, компьютер, телевизор) и скачать их.\n\n"
+              f"Вход в личный кабинет: {link}\n\n"
+              f"Если вы не отправляли заявку — просто проигнорируйте это письмо.\n")
     return True, "OK"
 
 def _reject_user(username: str) -> tuple:
@@ -2777,10 +2831,13 @@ async def api_user_notify(request: Request, username: str):
     if not u:
         return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
     ok, msg = await run_in_threadpool(
-        send_mail, u["email"], f"{SERVER_LABEL}: обновите конфиги VPN",
+        send_mail, u["email"], f"{SERVER_LABEL}: обновление настроек",
         f"Здравствуйте, {u['username']}!\n\n"
-        f"Настройки сервера изменились. Зайдите в личный кабинет и заново "
-        f"скачайте конфиги для своих устройств:\n{client_portal_url()}/ulogin\n")
+        f"На сервере обновились настройки подключения. Пожалуйста, зайдите "
+        f"в личный кабинет и скачайте настройки для своих устройств заново — "
+        f"старые могут перестать работать.\n\n"
+        f"Личный кабинет: {client_portal_url()}/ulogin\n\n"
+        f"Если у вас всё работает — просто проигнорируйте это письмо.\n")
     if not ok:
         return JSONResponse({"error": msg}, status_code=500)
     return {"ok": True}
