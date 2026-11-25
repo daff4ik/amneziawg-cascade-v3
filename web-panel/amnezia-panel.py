@@ -166,6 +166,15 @@ def send_mail(to_addr: str, subject: str, body: str) -> tuple:
     except Exception as e:
         return False, str(e)[:300]
 
+def send_mail_smart(to_addr: str, subject: str, body: str) -> tuple:
+    """Отправка с фолбэком: если Яндекс режет письмо как спам (554),
+    переотправляем без ссылок — уведомление важнее ссылки."""
+    ok, msg = send_mail(to_addr, subject, body)
+    if not ok and "554" in msg:
+        plain = re.sub(r"https?://\S+", "(адрес кабинета уточните у администратора)", body)
+        ok, msg = send_mail(to_addr, subject, plain)
+    return ok, msg
+
 
 # ================ Общие константы каскада (пишет deploy.sh) ================
 def load_cascade_env():
@@ -2120,7 +2129,7 @@ async def api_proto_action(request: Request, action: str, name: str):
             for u in users:
                 if u["status"] == "approved":
                     await run_in_threadpool(
-                        send_mail, u["email"], f"{SERVER_LABEL}: обновление настроек",
+                        send_mail_smart, u["email"], f"{SERVER_LABEL}: обновление настроек",
                         f"Здравствуйте, {u['username']}!\n\n"
                         f"На сервере обновились настройки подключения. Пожалуйста, зайдите "
                         f"в личный кабинет и скачайте настройки для своих устройств заново — "
@@ -2749,7 +2758,7 @@ def _approve_user(username: str) -> tuple:
     conn.commit()
     conn.close()
     link = f"{client_portal_url()}/ulogin"
-    send_mail(u["email"], f"{SERVER_LABEL}: заявка подтверждена",
+    send_mail_smart(u["email"], f"{SERVER_LABEL}: заявка подтверждена",
               f"Здравствуйте, {u['username']}!\n\n"
               f"Хорошие новости — администратор подтвердил вашу заявку.\n"
               f"Теперь вам доступен личный кабинет, где можно создать настройки "
@@ -2831,7 +2840,7 @@ async def api_user_notify(request: Request, username: str):
     if not u:
         return JSONResponse({"error": "Пользователь не найден"}, status_code=404)
     ok, msg = await run_in_threadpool(
-        send_mail, u["email"], f"{SERVER_LABEL}: обновление настроек",
+        send_mail_smart, u["email"], f"{SERVER_LABEL}: обновление настроек",
         f"Здравствуйте, {u['username']}!\n\n"
         f"На сервере обновились настройки подключения. Пожалуйста, зайдите "
         f"в личный кабинет и скачайте настройки для своих устройств заново — "
@@ -2861,7 +2870,7 @@ async def api_users_broadcast(request: Request):
     footer = f"\n---\nЛичный кабинет: {client_portal_url()}/ulogin\n"
     for name in targets:
         u = approved[name]
-        ok, msg = await run_in_threadpool(send_mail, u["email"], subject,
+        ok, msg = await run_in_threadpool(send_mail_smart, u["email"], subject,
                                           f"Здравствуйте, {u['username']}!\n\n{text}{footer}")
         results[name] = "ok" if ok else msg
     sent = sum(1 for v in results.values() if v == "ok")
