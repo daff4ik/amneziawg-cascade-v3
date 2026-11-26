@@ -1332,11 +1332,7 @@ async function loadUsers() {
     if (!r.ok) throw new Error('Ошибка сервера');
     const list = await r.json();
     _allUsers = list;
-    try {
-      const lr = await fetch(BASE_URL + '/api/limits', {credentials:'same-origin'});
-      _limits = {};
-      (await lr.json()).forEach(l => { _limits[l.scope + ':' + l.target] = l; });
-    } catch(e) { _limits = {}; }
+    await loadLimits();
     const pending = list.filter(u => u.status === 'pending').length;
     document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
     document.getElementById('reg-link').textContent = location.origin + '/cli/register';
@@ -1459,6 +1455,14 @@ async function userResetPass(username, label) {
 let _limits = {};
 let _limitTarget = null;  // {scope, target, label}
 
+async function loadLimits() {
+  try {
+    const lr = await fetch(BASE_URL + '/api/limits', {credentials:'same-origin'});
+    _limits = {};
+    (await lr.json()).forEach(l => { _limits[l.scope + ':' + l.target] = l; });
+  } catch(e) {}
+}
+
 function limitBadge(scope, target) {
   const l = _limits[scope + ':' + target];
   if (!l) return '';
@@ -1495,7 +1499,7 @@ async function saveLimit() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Ошибка');
   } catch(e) { alert('❌ ' + e.message); }
-  finally { hideLoader(); loadUsers(); }
+  finally { hideLoader(); loadUsers(); fetchClients(); }
 }
 
 async function deleteLimit() {
@@ -1509,7 +1513,7 @@ async function deleteLimit() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Ошибка');
   } catch(e) { alert('❌ ' + e.message); }
-  finally { hideLoader(); loadUsers(); }
+  finally { hideLoader(); loadUsers(); fetchClients(); }
 }
 
 // ==================== Mail settings ====================
@@ -1832,7 +1836,7 @@ function renderClients(clients) {
     const safeName = escapeHtml(c.name);
     
     return `<tr>
-      <td data-label="Имя"><strong>${safeName}</strong></td>
+      <td data-label="Имя"><strong>${safeName}</strong> ${limitBadge('device', c.name)}</td>
       <td data-label="IP">${escapeHtml(c.ip)}</td>
       <td data-label="Статус"><span class="status-badge ${statusClass}">${statusLabel}</span></td>
       <td data-label="RX">${escapeHtml(c.rx)}</td>
@@ -1841,6 +1845,7 @@ function renderClients(clients) {
       <td data-label="Действия" class="actions-cell">
         <a href="${BASE_URL}/download/conf/${encName}" class="btn btn-small" title="Скачать .conf">.conf</a>
         <a href="${BASE_URL}/download/vpn/${encName}" class="btn btn-small" title="Amnezia Link">vpn://</a>
+        <button class="btn btn-small" onclick="openLimit('device','${safeName}','${safeName}')" title="Лимит скорости/трафика">⚡</button>
         <form method="post" action="${BASE_URL}/delete/${encName}" onsubmit="return confirm('Удалить клиента ${safeName}?');" style="margin:0;">
           <button type="submit" class="btn btn-small btn-danger" title="Удалить">×</button>
         </form>
@@ -1854,7 +1859,7 @@ async function fetchClients() {
   try {
     const r = await fetch(BASE_URL + '/api/clients', {credentials:'same-origin', cache:'no-store'});
     if (r.status === 401) { location.reload(); return; }
-    if (r.ok) { _allClients = await r.json(); applyFilters(); }
+    if (r.ok) { _allClients = await r.json(); await loadLimits(); applyFilters(); }
   } catch (e) { console.error(e); }
 }
 
