@@ -64,6 +64,15 @@ def users_db():
         owner TEXT NOT NULL,
         label TEXT NOT NULL,
         created_ts INTEGER NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS limits(
+        scope TEXT, target TEXT,
+        max_kbps INT DEFAULT 0,
+        quota_mb INT DEFAULT 0,
+        throttle_kbps INT DEFAULT 0,
+        baseline_bytes INT DEFAULT 0,
+        baseline_day TEXT DEFAULT '',
+        throttled INT DEFAULT 0,
+        PRIMARY KEY(scope, target))""")
     return conn
 
 def hash_password(p: str) -> str:
@@ -1025,8 +1034,9 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 
     <div class="card">
       <div class="toolbar">
-        <div class="search-box">
-          <input type="text" id="search-input" name="client-search-filter" placeholder="Поиск по имени или IP..." oninput="applyFilters()" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other">
+        <button class="btn" id="search-toggle" onclick="toggleSearch()" style="white-space:nowrap;">🔍 Поиск</button>
+        <div class="search-box" id="search-box" style="display:none;">
+          <input type="text" id="search-input" name="client-search-filter" placeholder="Поиск по имени или IP..." oninput="applyFilters()" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" readonly onfocus="this.removeAttribute('readonly')">
         </div>
         <div class="filter-box">
           <select id="status-filter" onchange="applyFilters()">
@@ -1208,6 +1218,31 @@ New-NetFirewallRule -DisplayName "Allow Ping from VPN" -Direction Inbound -Proto
   <div id="loader-text" style="font-weight: 500;">Подождите...</div>
 </div>
 
+<!-- Модальное окно: лимиты скорости/трафика -->
+<div id="limit-modal" class="modal">
+  <div class="modal-content">
+    <button class="modal-close" onclick="closeModal('limit-modal')">&times;</button>
+    <h3>⚡ Лимиты: <span id="limit-title"></span></h3>
+    <div id="limit-current" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.75rem;"></div>
+    <div style="display:flex;flex-direction:column;gap:0.6rem;">
+      <label style="font-size:0.85rem;">Максимальная скорость, Мбит/с <span style="color:var(--text-muted);">(0 = без лимита)</span>
+        <input type="number" id="limit-max" min="0" max="10000" placeholder="0" style="width:100%;padding:0.55rem 0.7rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);margin-top:0.25rem;">
+      </label>
+      <label style="font-size:0.85rem;">Дневной лимит трафика, ГБ <span style="color:var(--text-muted);">(0 = без квоты)</span>
+        <input type="number" id="limit-quota" min="0" max="100000" placeholder="0" style="width:100%;padding:0.55rem 0.7rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);margin-top:0.25rem;">
+      </label>
+      <label style="font-size:0.85rem;">Скорость после превышения квоты, Мбит/с
+        <input type="number" id="limit-throttle" min="0" max="10000" placeholder="например, 1" style="width:100%;padding:0.55rem 0.7rem;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);margin-top:0.25rem;">
+      </label>
+    </div>
+    <div style="font-size:0.78rem;color:var(--text-muted);margin-top:0.5rem;">Квота считается за календарный день, в полночь скорость восстанавливается автоматически.</div>
+    <div style="display:flex;gap:0.5rem;margin-top:0.9rem;">
+      <button class="btn btn-primary" style="flex:1;" onclick="saveLimit()">Сохранить</button>
+      <button class="btn btn-danger" style="flex:1;" onclick="deleteLimit()">Снять лимит</button>
+    </div>
+  </div>
+</div>
+
 <!-- Модальное окно: рассылка абонентам -->
 <div id="broadcast-modal" class="modal">
   <div class="modal-content">
@@ -1248,6 +1283,25 @@ function toggleTheme() {
 function showLoader(txt) { document.getElementById('loader-text').textContent = txt; document.getElementById('global-loader').style.display = 'flex'; }
 function hideLoader() { document.getElementById('global-loader').style.display = 'none'; }
 function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
+// Поле поиска скрыто, пока не нажата кнопка 🔍 — иначе браузер подставляет
+// в него сохранённый логин администратора (readonly снимается только вручную)
+function toggleSearch() {
+  const box = document.getElementById('search-box');
+  const btn = document.getElementById('search-toggle');
+  if (box.style.display === 'none') {
+    box.style.display = '';
+    btn.classList.add('btn-primary');
+    const inp = document.getElementById('search-input');
+    inp.value = '';
+    applyFilters();
+  } else {
+    box.style.display = 'none';
+    btn.classList.remove('btn-primary');
+    document.getElementById('search-input').value = '';
+    applyFilters();
+  }
+}
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 function formatDateTime(val) {
@@ -1278,6 +1332,11 @@ async function loadUsers() {
     if (!r.ok) throw new Error('Ошибка сервера');
     const list = await r.json();
     _allUsers = list;
+    try {
+      const lr = await fetch(BASE_URL + '/api/limits', {credentials:'same-origin'});
+      _limits = {};
+      (await lr.json()).forEach(l => { _limits[l.scope + ':' + l.target] = l; });
+    } catch(e) { _limits = {}; }
     const pending = list.filter(u => u.status === 'pending').length;
     document.getElementById('users-pending').textContent = pending ? `(${pending} ⏳)` : '';
     document.getElementById('reg-link').textContent = location.origin + '/cli/register';
@@ -1292,15 +1351,17 @@ async function loadUsers() {
           <button class="btn btn-small btn-danger" onclick="userAction('reject','${u.username}','${escapeHtml(u.username)}')">❌ Отклонить</button>`;
       } else {
         if (u.status === 'approved') {
-          actions += `<button class="btn btn-small" onclick="userNotify('${u.username}','${escapeHtml(u.username)}')">✉️ Уведомить (обновить конфиг)</button>
+          actions += `<button class="btn btn-small" onclick="openLimit('user','${u.username}','${escapeHtml(u.username)} (все устройства)')">⚡ Лимит</button>
+            <button class="btn btn-small" onclick="userNotify('${u.username}','${escapeHtml(u.username)}')">✉️ Уведомить (обновить конфиг)</button>
             <button class="btn btn-small" onclick="userResetPass('${u.username}','${escapeHtml(u.username)}')">🔑 Сброс пароля</button>`;
         }
         actions += ` <button class="btn btn-small btn-danger" onclick="userDelete('${u.username}','${escapeHtml(u.username)}',${u.devices.length})">🗑 Удалить</button>`;
       }
       const devRows = u.devices.map(d => `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.4rem 0.4rem 1.5rem;border-top:1px dashed var(--border);flex-wrap:wrap;">
-          <span style="flex:1;min-width:120px;">└ ${escapeHtml(d.label)} <code style="font-size:0.75rem;color:var(--text-muted);">${escapeHtml(d.client_name)}</code></span>
+          <span style="flex:1;min-width:120px;">└ ${escapeHtml(d.label)} ${limitBadge('device', d.client_name)} <code style="font-size:0.75rem;color:var(--text-muted);">${escapeHtml(d.client_name)}</code></span>
           <a class="btn btn-small" href="${BASE_URL}/download/conf/${encodeURIComponent(d.client_name)}">⬇ .conf</a>
           <a class="btn btn-small" href="${BASE_URL}/download/vpn/${encodeURIComponent(d.client_name)}">⬇ .vpn</a>
+          <button class="btn btn-small" onclick="openLimit('device','${d.client_name}','${escapeHtml(d.label)} (${escapeHtml(d.client_name)})')">⚡</button>
           <button class="btn btn-small btn-danger" onclick="deviceDelete('${d.client_name}','${escapeHtml(d.label)}')">🗑</button>
         </div>`).join('');
       const addDev = u.status === 'approved' ? `<div style="display:flex;gap:0.5rem;padding:0.5rem 0 0 1.5rem;flex-wrap:wrap;">
@@ -1309,7 +1370,7 @@ async function loadUsers() {
         </div>` : '';
       return `<div style="border:1px solid var(--border);border-radius:12px;padding:1rem;margin-bottom:0.75rem;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-          <div><strong>${escapeHtml(u.username)}</strong> ${badges[u.status] || u.status}
+          <div><strong>${escapeHtml(u.username)}</strong> ${badges[u.status] || u.status} ${limitBadge('user', u.username)}
             <div style="font-size:0.8rem;color:var(--text-muted);">${escapeHtml(u.email)}</div>
           </div>
           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">${actions}</div>
@@ -1392,6 +1453,63 @@ async function userResetPass(username, label) {
     alert('✅ Пароль изменён. Передайте его пользователю.');
   } catch(e) { alert('❌ ' + e.message); }
   finally { hideLoader(); }
+}
+
+// ==================== Лимиты скорости/трафика ====================
+let _limits = {};
+let _limitTarget = null;  // {scope, target, label}
+
+function limitBadge(scope, target) {
+  const l = _limits[scope + ':' + target];
+  if (!l) return '';
+  const parts = [];
+  if (l.max_kbps) parts.push('⚡ ' + (l.max_kbps / 1000) + ' Мбит/с');
+  if (l.quota_mb) parts.push('📦 ' + (l.quota_mb / 1024) + ' ГБ/день' + (l.throttled ? ' → урезан!' : ' → ' + (l.throttle_kbps / 1000) + ' Мбит/с после'));
+  return `<span class="status-badge ${l.throttled ? 'status-offline' : 'status-online'}" style="font-size:0.7rem;">${parts.join(' · ')}</span>`;
+}
+
+function openLimit(scope, target, label) {
+  _limitTarget = {scope, target, label};
+  const l = _limits[scope + ':' + target] || {};
+  document.getElementById('limit-title').textContent = label;
+  document.getElementById('limit-max').value = l.max_kbps ? l.max_kbps / 1000 : '';
+  document.getElementById('limit-quota').value = l.quota_mb ? l.quota_mb / 1024 : '';
+  document.getElementById('limit-throttle').value = l.throttle_kbps ? l.throttle_kbps / 1000 : '';
+  document.getElementById('limit-current').textContent = l.throttled
+    ? '⚠️ Сейчас действует урезание: дневная квота исчерпана (сбросится в полночь).'
+    : (l.max_kbps || l.quota_mb ? 'Лимит уже задан — измените значения или снимите его.' : 'Лимит пока не задан.');
+  document.getElementById('limit-modal').style.display = 'flex';
+}
+
+async function saveLimit() {
+  if (!_limitTarget) return;
+  const body = {scope: _limitTarget.scope, target: _limitTarget.target,
+    max_mbps: parseFloat(document.getElementById('limit-max').value) || 0,
+    quota_gb: parseFloat(document.getElementById('limit-quota').value) || 0,
+    throttle_mbps: parseFloat(document.getElementById('limit-throttle').value) || 0};
+  closeModal('limit-modal');
+  showLoader('Применение лимита...');
+  try {
+    const r = await fetch(BASE_URL + '/api/limits', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); }
+}
+
+async function deleteLimit() {
+  if (!_limitTarget) return;
+  closeModal('limit-modal');
+  showLoader('Снятие лимита...');
+  try {
+    const r = await fetch(BASE_URL + '/api/limits/delete', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({scope: _limitTarget.scope, target: _limitTarget.target})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Ошибка');
+  } catch(e) { alert('❌ ' + e.message); }
+  finally { hideLoader(); loadUsers(); }
 }
 
 // ==================== Mail settings ====================
@@ -2977,6 +3095,68 @@ async def api_mail_test(request: Request):
         "Это тестовое письмо от панели AmneziaWG. Если вы его видите — SMTP настроен верно.\n")
     if not ok:
         return JSONResponse({"error": msg}, status_code=500)
+    return {"ok": True}
+
+# ================ Лимиты скорости и дневного трафика ================
+LIMITS_SCRIPT = "/usr/local/bin/amnezia-limits.py"
+
+@app.get("/api/limits")
+async def api_limits_get(request: Request):
+    current_user(request)
+    def _q():
+        conn = users_db()
+        rows = conn.execute(
+            "SELECT scope,target,max_kbps,quota_mb,throttle_kbps,throttled FROM limits").fetchall()
+        conn.close()
+        return [{"scope": r[0], "target": r[1], "max_kbps": r[2], "quota_mb": r[3],
+                 "throttle_kbps": r[4], "throttled": r[5]} for r in rows]
+    return JSONResponse(await run_in_threadpool(_q))
+
+@app.post("/api/limits")
+async def api_limits_set(request: Request):
+    current_user(request)
+    body = await request.json()
+    scope = str(body.get("scope", ""))
+    target = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("target", "")))
+    if scope not in ("user", "device") or not target:
+        return JSONResponse({"error": "Некорректная цель лимита"}, status_code=400)
+    def _int(v, lo, hi):
+        try: return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError): return 0
+    # в панели вводятся Мбит/с и ГБ — храним в кбит/с и МБ
+    max_kbps = _int(body.get("max_mbps", 0), 0, 10000) * 1000
+    quota_mb = _int(body.get("quota_gb", 0), 0, 100000) * 1024
+    throttle_kbps = _int(body.get("throttle_mbps", 0), 0, 10000) * 1000
+    if throttle_kbps and not quota_mb:
+        return JSONResponse({"error": "Скорость после превышения задаётся только вместе с квотой"}, status_code=400)
+    if not (max_kbps or quota_mb):
+        return JSONResponse({"error": "Задайте лимит скорости и/или дневную квоту"}, status_code=400)
+    def _q():
+        conn = users_db()
+        conn.execute(
+            "INSERT INTO limits(scope,target,max_kbps,quota_mb,throttle_kbps) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(scope,target) DO UPDATE SET max_kbps=excluded.max_kbps, "
+            "quota_mb=excluded.quota_mb, throttle_kbps=excluded.throttle_kbps, throttled=0",
+            (scope, target, max_kbps, quota_mb, throttle_kbps))
+        conn.commit()
+        conn.close()
+    await run_in_threadpool(_q)
+    await run_in_threadpool(srv_exec, f"{LIMITS_SCRIPT} apply && {LIMITS_SCRIPT} monitor", 30)
+    return {"ok": True}
+
+@app.post("/api/limits/delete")
+async def api_limits_del(request: Request):
+    current_user(request)
+    body = await request.json()
+    scope = str(body.get("scope", ""))
+    target = re.sub(r"[^a-zA-Z0-9_-]", "", str(body.get("target", "")))
+    def _q():
+        conn = users_db()
+        conn.execute("DELETE FROM limits WHERE scope=? AND target=?", (scope, target))
+        conn.commit()
+        conn.close()
+    await run_in_threadpool(_q)
+    await run_in_threadpool(srv_exec, f"{LIMITS_SCRIPT} apply", 30)
     return {"ok": True}
 
 # --- точка входа для бота (одобрение/отклонение заявок кнопками) ---

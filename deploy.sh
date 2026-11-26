@@ -276,6 +276,7 @@ SCRIPTS_TO_DOWNLOAD=(
     amnezia-traffic-collector.py
     amnezia-vpn-link.py
     amnezia-tg-bot.py
+    amnezia-limits.py
     amnezia-panel-access.sh
     amnezia-server-install.sh
     amnezia-backup.sh
@@ -797,6 +798,17 @@ if [[ -x /usr/local/bin/amnezia-traffic-collector.py ]]; then
 EOF
     chmod 644 /etc/cron.d/amnezia-traffic
     /usr/local/bin/amnezia-traffic-collector.py 2>/dev/null || true
+fi
+
+# Лимиты скорости/квот (панель → amnezia-limits.py): монитор каждую минуту,
+# восстановление tc-правил после перезагрузки
+if [[ -x /usr/local/bin/amnezia-limits.py ]]; then
+    cat > /etc/cron.d/amnezia-limits <<'EOF'
+* * * * * root /usr/local/bin/amnezia-limits.py monitor >/dev/null 2>&1
+@reboot root sleep 30 && /usr/local/bin/amnezia-limits.py apply >/dev/null 2>&1
+EOF
+    chmod 644 /etc/cron.d/amnezia-limits
+    /usr/local/bin/amnezia-limits.py apply 2>/dev/null || true
 fi
 
 # === Telegram-бот управления (команды из чата) ===
