@@ -704,7 +704,9 @@ CABINET_TEMPLATE = r"""<!DOCTYPE html>
   .alert { padding: 0.8rem 1rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.9rem; display: none; }
   .alert.ok { display: block; background: rgba(52,199,89,0.12); color: var(--online); }
   .alert.err { display: block; background: rgba(217,48,37,0.12); color: var(--danger); }
-  .code-box { word-break: break-all; font-size: 0.72rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; margin-top: 0.6rem; display: none; max-height: 220px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .code-box { word-break: break-all; font-size: 0.72rem; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; margin-top: 0.6rem; display: none; max-height: 220px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; cursor: pointer; }
+  .code-box:hover { border-color: var(--primary); }
+  .copy-hint { display: none; margin-top: 0.5rem; font-size: 0.78rem; color: var(--primary); }
   @media (max-width: 600px) {
     .container { padding: 0.75rem; }
     .card { padding: 1rem; border-radius: 12px; }
@@ -772,7 +774,8 @@ async function loadDevices(){
           <button class="btn" onclick="showText('${esc(d.client_name)}','vpn')" title="Для приложения AmneziaVPN">🔗 vpn:// <span style="opacity:0.75;font-size:0.75em;">AmneziaVPN</span></button>
           <button class="btn btn-secondary" onclick="showText('${esc(d.client_name)}','conf')">👁 Показать</button>
         </div>
-        <div class="code-box" id="box-${esc(d.client_name)}"></div>
+        <div class="copy-hint" id="hint-${esc(d.client_name)}">📋 Нажмите на текст ниже — он скопируется в буфер обмена</div>
+        <div class="code-box" id="box-${esc(d.client_name)}" onclick="copyBox('${esc(d.client_name)}')" title="Нажмите, чтобы скопировать"></div>
       </div>`;
     }).join('');
   } catch(e) { document.getElementById('devices-list').innerHTML = '<div class="muted">Ошибка загрузки</div>'; }
@@ -799,7 +802,8 @@ async function delDevice(clientName, label){
 }
 async function showText(clientName, kind){
   const el = document.getElementById('box-' + clientName);
-  if (el.style.display === 'block' && el.dataset.kind === kind) { el.style.display = 'none'; return; }
+  const hint = document.getElementById('hint-' + clientName);
+  if (el.style.display === 'block' && el.dataset.kind === kind) { el.style.display = 'none'; hint.style.display = 'none'; return; }
   const url = kind === 'vpn'
     ? BASE_URL + '/cabinet/dl/vpn/' + encodeURIComponent(clientName)
     : BASE_URL + '/cabinet/dl/conf/' + encodeURIComponent(clientName) + '?raw=1';
@@ -809,7 +813,23 @@ async function showText(clientName, kind){
   el.textContent = txt;
   el.dataset.kind = kind;
   el.style.display = 'block';
-  try { await navigator.clipboard.writeText(txt); alertBox('ok', (kind==='vpn'?'vpn:// ссылка':'Содержимое') + ' скопировано в буфер обмена'); } catch(e) {}
+  hint.style.display = 'block';
+  try { await navigator.clipboard.writeText(txt); alertBox('ok', (kind==='vpn'?'vpn:// ссылка':'Содержимое') + ' уже в буфере обмена'); } catch(e) {}
+}
+async function copyBox(clientName){
+  const el = document.getElementById('box-' + clientName);
+  try {
+    await navigator.clipboard.writeText(el.textContent);
+    alertBox('ok', '✅ Скопировано в буфер обмена');
+  } catch(e) {
+    // Запасной вариант для старых браузеров: выделяем текст
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    alertBox('ok', 'Текст выделен — нажмите Ctrl+C (или долгий тап → Копировать)');
+  }
 }
 initTheme();
 loadDevices();
@@ -2572,9 +2592,19 @@ async def cabinet_page(request: Request):
             .replace("__LABEL__", SERVER_LABEL).replace("__BASE__", req_prefix(request)))
 
 # --- общий хелпер создания/удаления конфига-устройства ---
+TRANSLIT = {"а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh","з":"z",
+            "и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r",
+            "с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"ts","ч":"ch","ш":"sh","щ":"sch",
+            "ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya"}
+
+def slugify_label(label: str) -> str:
+    """'Телефон Макса' -> 'telefon_maksa' (кириллица транслитерируется, не схлопывается)."""
+    slug = re.sub(r"[^a-z0-9_-]+", "_",
+                  "".join(TRANSLIT.get(ch, ch) for ch in label.lower())).strip("_")
+    return slug[:24] or "dev"
+
 def device_client_name(owner: str, label: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", label).strip("_")[:24] or "dev"
-    return f"{owner}-{slug}"
+    return f"{owner}-{slugify_label(label)}"
 
 def create_device(owner: str, label: str) -> tuple:
     """(ok, client_name_or_error)"""
@@ -2586,11 +2616,17 @@ def create_device(owner: str, label: str) -> tuple:
     if cnt >= MAX_DEVICES_PER_USER:
         conn.close()
         return False, f"Лимит: не более {MAX_DEVICES_PER_USER} устройств"
-    client_name = device_client_name(owner, label)
-    if conn.execute("SELECT 1 FROM devices WHERE client_name=?", (client_name,)).fetchone() \
-            or os.path.exists(os.path.join(CLIENTS_DIR, f"{client_name}.conf")):
+    base_name = device_client_name(owner, label)
+    client_name = ""
+    for i in range(1, 10):
+        candidate = base_name if i == 1 else f"{base_name}-{i}"
+        if not conn.execute("SELECT 1 FROM devices WHERE client_name=?", (candidate,)).fetchone() \
+                and not os.path.exists(os.path.join(CLIENTS_DIR, f"{candidate}.conf")):
+            client_name = candidate
+            break
+    if not client_name:
         conn.close()
-        return False, "Устройство с таким названием уже есть — выберите другое"
+        return False, "Слишком много устройств с похожим названием — выберите другое"
     conn.execute("INSERT INTO devices(client_name,owner,label,created_ts) VALUES(?,?,?,?)",
                  (client_name, owner, label, int(time.time())))
     conn.commit()
